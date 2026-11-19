@@ -1,6 +1,10 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export interface VerifiedFirebaseToken {
   uid: string;
@@ -13,6 +17,13 @@ export interface VerifiedFirebaseToken {
   iss: string;
   iat: number;
   exp: number;
+  firebase?: {
+    identities?: {
+      email?: string[];
+      [key: string]: unknown;
+    };
+    sign_in_provider?: string;
+  };
 }
 
 const GOOGLE_CERTS_URL =
@@ -21,25 +32,39 @@ const GOOGLE_CERTS_URL =
 let cachedCerts: Record<string, string> | null = null;
 let cachedCertsExpiresAt = 0;
 
-export function resolveFirebaseProjectId(): string {
-  if (process.env.FIREBASE_PROJECT_ID) {
-    return process.env.FIREBASE_PROJECT_ID;
-  }
+function readFirebaseAppletConfig(): { projectId?: string; apiKey?: string } {
   const candidates = [
     path.resolve(process.cwd(), 'firebase-applet-config.json'),
+    path.resolve(__dirname, '..', 'firebase-applet-config.json'),
+    path.resolve(__dirname, '..', '..', 'firebase-applet-config.json'),
     path.resolve(process.cwd(), '..', 'firebase-applet-config.json'),
   ];
   for (const filePath of candidates) {
     try {
       if (fs.existsSync(filePath)) {
-        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        if (parsed?.projectId) return String(parsed.projectId);
+        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
       }
     } catch {
-      // ignore and try fallback
+      // ignore and try next candidate
     }
   }
-  return 'xenon-tempest-nq7xb';
+  return {};
+}
+
+export function resolveFirebaseProjectId(): string {
+  if (process.env.FIREBASE_PROJECT_ID) {
+    return process.env.FIREBASE_PROJECT_ID;
+  }
+  const cfg = readFirebaseAppletConfig();
+  return cfg.projectId || 'xenon-tempest-nq7xb';
+}
+
+function resolveFirebaseApiKey(): string | null {
+  if (process.env.FIREBASE_API_KEY) {
+    return process.env.FIREBASE_API_KEY;
+  }
+  const cfg = readFirebaseAppletConfig();
+  return cfg.apiKey || null;
 }
 
 async function fetchGooglePublicCerts(forceRefresh = false): Promise<Record<string, string>> {
@@ -68,6 +93,36 @@ function decodeBase64UrlJson<T = Record<string, unknown>>(segment: string): T {
   const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
   const raw = Buffer.from(padded, 'base64').toString('utf8');
   return JSON.parse(raw) as T;
+}
+
+async function lookupEmailViaIdentityToolkit(idToken: string): Promise<{ email?: string; displayName?: string }> {
+  const apiKey = resolveFirebaseApiKey();
+  if (!apiKey) return {};
+  try {
+    const res = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      },
+    );
+    if (!res.ok) return {};
+    const data = (await res.json()) as {
+      users?: Array<{
+        email?: string;
+        displayName?: string;
+        providerUserInfo?: Array<{ email?: string; displayName?: string }>;
+      }>;
+    };
+    const u = data.users?.[0];
+    if (!u) return {};
+    const email = u.email || u.providerUserInfo?.find((p) => p.email)?.email;
+    const displayName = u.displayName || u.providerUserInfo?.find((p) => p.displayName)?.displayName;
+    return { email, displayName };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -136,8 +191,24 @@ export async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedFi
     throw new Error('Horodatage du jeton Firebase invalide.');
   }
 
+  // Extract authoritative email from top-level claim, nested firebase.identities.email, or Identity Toolkit lookup
+  let resolvedEmail =
+    payload.email ||
+    (Array.isArray(payload.firebase?.identities?.email)
+      ? payload.firebase?.identities?.email[0]
+      : undefined);
+  let resolvedName = payload.name;
+
+  if (!resolvedEmail) {
+    const lookedUp = await lookupEmailViaIdentityToolkit(idToken);
+    if (lookedUp.email) resolvedEmail = lookedUp.email;
+    if (!resolvedName && lookedUp.displayName) resolvedName = lookedUp.displayName;
+  }
+
   return {
     ...payload,
     uid: payload.sub,
+    email: resolvedEmail,
+    name: resolvedName,
   };
 }
