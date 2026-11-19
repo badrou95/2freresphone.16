@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
@@ -9,16 +9,23 @@ import {
   History,
   Mail,
   Plus,
+  Printer,
   RefreshCw,
+  Save,
+  Search,
   Upload,
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
+import { printProductThermalLabels } from '../../lib/printer';
 import { formatDzd } from '../../shared/domain';
+import { StoreSettings } from '../../types';
+import { FinancialMarginWidget } from './FinancialMarginWidget';
 
 interface AdminStockImportProps {
   products: any[];
   categories: any[];
   stockData: any;
+  storeSettings?: Partial<StoreSettings>;
   initialSubTab?: 'import' | 'levels' | 'alerts';
   onRefresh: () => void;
   onGoToMissingPhotos: () => void;
@@ -41,7 +48,8 @@ export function AdminStockImport({
   products,
   categories,
   stockData,
-  initialSubTab = 'import',
+  storeSettings = {},
+  initialSubTab = 'levels',
   onRefresh,
   onGoToMissingPhotos,
 }: AdminStockImportProps) {
@@ -60,9 +68,17 @@ export function AdminStockImport({
   const [importError, setImportError] = useState<string | null>(null);
   const [commitResult, setCommitResult] = useState<any | null>(null);
 
-  // Manual quick stock adjust
+  // Manual quick stock adjust & inline editor (quantity, cost price, sale price)
   const [adjustingId, setAdjustingId] = useState<number | null>(null);
+  const [savingInlineId, setSavingInlineId] = useState<number | null>(null);
+  const [savingAll, setSavingAll] = useState(false);
   const [stockFilter, setStockFilter] = useState<'all' | 'low' | 'out'>('all');
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  const [levelSearch, setLevelSearch] = useState('');
+  const [draftRows, setDraftRows] = useState<
+    Record<number, { stockQuantity: string; costPriceDzd: string; priceDzd: string }>
+  >({});
+  const [stockFeedback, setStockFeedback] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
 
   const runPreview = async (
     file: File,
@@ -149,8 +165,9 @@ export function AdminStockImport({
 
   const handleQuickAdjust = async (productId: number, delta: number) => {
     setAdjustingId(productId);
+    setStockFeedback(null);
     try {
-      await adminFetch('/api/admin/stock/adjust', {
+      const res = await adminFetch<any>('/api/admin/stock/adjust', {
         method: 'POST',
         body: JSON.stringify({
           productId,
@@ -158,24 +175,161 @@ export function AdminStockImport({
           reason: delta > 0 ? 'Réapprovisionnement rapide admin' : 'Sortie manuelle admin',
         }),
       });
+      setDraftRows((prev) => {
+        if (!prev[productId]) return prev;
+        return {
+          ...prev,
+          [productId]: {
+            ...prev[productId],
+            stockQuantity: String(res.newQty ?? 0),
+          },
+        };
+      });
       onRefresh();
+    } catch (err: any) {
+      setStockFeedback({ type: 'err', msg: err?.message || 'Erreur lors de l’ajustement rapide.' });
     } finally {
       setAdjustingId(null);
     }
   };
 
-  const physicalProducts = products.filter((p) => p.productType === 'physical');
-  const filteredLevels = physicalProducts.filter((p) => {
-    if (stockFilter === 'low') return p.isLowStock;
-    if (stockFilter === 'out') return p.stockQuantity <= 0;
-    return true;
-  });
+  const getRowDraft = (p: any) =>
+    draftRows[p.id] || {
+      stockQuantity: String(p.stockQuantity ?? 0),
+      costPriceDzd: String(p.costPriceDzd ?? 0),
+      priceDzd: String(p.priceDzd ?? 0),
+    };
+
+  const updateRowDraft = (
+    p: any,
+    field: 'stockQuantity' | 'costPriceDzd' | 'priceDzd',
+    value: string,
+  ) => {
+    setDraftRows((prev) => ({
+      ...prev,
+      [p.id]: {
+        ...(prev[p.id] || {
+          stockQuantity: String(p.stockQuantity ?? 0),
+          costPriceDzd: String(p.costPriceDzd ?? 0),
+          priceDzd: String(p.priceDzd ?? 0),
+        }),
+        [field]: value,
+      },
+    }));
+  };
+
+  const handleSaveInlineRow = async (p: any) => {
+    const draft = getRowDraft(p);
+    setSavingInlineId(p.id);
+    setStockFeedback(null);
+    try {
+      await adminFetch(`/api/admin/stock/product/${p.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          stockQuantity: Math.max(0, Math.round(Number(draft.stockQuantity) || 0)),
+          costPriceDzd: Math.max(0, Math.round(Number(draft.costPriceDzd) || 0)),
+          priceDzd: Math.max(0, Math.round(Number(draft.priceDzd) || 0)),
+        }),
+      });
+      setDraftRows((prev) => {
+        const copy = { ...prev };
+        delete copy[p.id];
+        return copy;
+      });
+      setStockFeedback({
+        type: 'ok',
+        msg: `${p.name} mis à jour (Stock : ${draft.stockQuantity} u. · Achat : ${formatDzd(Number(draft.costPriceDzd) || 0)} · Vente : ${formatDzd(Number(draft.priceDzd) || 0)}).`,
+      });
+      onRefresh();
+    } catch (err: any) {
+      setStockFeedback({ type: 'err', msg: err?.message || 'Erreur lors de la mise à jour du produit.' });
+    } finally {
+      setSavingInlineId(null);
+    }
+  };
+
+  const dirtyProductIds = useMemo(() => Object.keys(draftRows).map(Number), [draftRows]);
+
+  const handleSaveAllDirty = async () => {
+    if (dirtyProductIds.length === 0) return;
+    setSavingAll(true);
+    setStockFeedback(null);
+    try {
+      const items = dirtyProductIds.map((productId) => {
+        const d = draftRows[productId];
+        return {
+          productId,
+          stockQuantity: Math.max(0, Math.round(Number(d.stockQuantity) || 0)),
+          costPriceDzd: Math.max(0, Math.round(Number(d.costPriceDzd) || 0)),
+          priceDzd: Math.max(0, Math.round(Number(d.priceDzd) || 0)),
+        };
+      });
+      const res = await adminFetch<{ updatedCount: number }>('/api/admin/stock/batch', {
+        method: 'PATCH',
+        body: JSON.stringify({ items }),
+      });
+      setDraftRows({});
+      setStockFeedback({
+        type: 'ok',
+        msg: `${res.updatedCount} article(s) mis à jour en base de données (quantités, prix d’achat et prix de vente).`,
+      });
+      onRefresh();
+    } catch (err: any) {
+      setStockFeedback({ type: 'err', msg: err?.message || 'Erreur lors de l’enregistrement groupé.' });
+    } finally {
+      setSavingAll(false);
+    }
+  };
+
+  const physicalProducts = useMemo(
+    () => products.filter((p) => p.productType === 'physical'),
+    [products],
+  );
+  const productNameById = useMemo(() => {
+    const map = new Map<number, { name: string; sku: string }>();
+    for (const p of products) map.set(p.id, { name: p.name, sku: p.sku });
+    return map;
+  }, [products]);
+
+  const filteredLevels = useMemo(() => {
+    const q = levelSearch.trim().toLowerCase();
+    return physicalProducts.filter((p) => {
+      if (stockFilter === 'low' && !p.isLowStock) return false;
+      if (stockFilter === 'out' && p.stockQuantity > 0) return false;
+      if (categoryFilter !== 'all' && String(p.categoryId || '') !== categoryFilter) return false;
+      if (q && !`${p.name} ${p.sku} ${p.barcode || ''}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [physicalProducts, stockFilter, categoryFilter, levelSearch]);
+
+  const liveFinancialItems = useMemo(
+    () =>
+      physicalProducts.map((p) => {
+        const d = draftRows[p.id];
+        return {
+          productType: p.productType,
+          stockQuantity: Number(d ? d.stockQuantity : p.stockQuantity) || 0,
+          costPriceDzd: Number(d ? d.costPriceDzd : p.costPriceDzd) || 0,
+          priceDzd: Number(d ? d.priceDzd : p.priceDzd) || 0,
+        };
+      }),
+    [physicalProducts, draftRows],
+  );
 
   const activeAlerts = (stockData?.alerts || []).filter((a: any) => a.status === 'active');
 
   return (
     <div className="space-y-5">
       <div className="inline-flex flex-wrap p-1 bg-slate-200/70 rounded-lg">
+        <button
+          type="button"
+          onClick={() => setSubTab('levels')}
+          className={`px-4 py-1.5 rounded-md text-xs font-semibold ${
+            subTab === 'levels' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+          }`}
+        >
+          Gestion &amp; Niveaux de stock ({physicalProducts.length})
+        </button>
         <button
           type="button"
           onClick={() => setSubTab('import')}
@@ -185,15 +339,6 @@ export function AdminStockImport({
         >
           <Database className="w-3.5 h-3.5" />
           <span>Importer base logiciel de stock</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setSubTab('levels')}
-          className={`px-4 py-1.5 rounded-md text-xs font-semibold ${
-            subTab === 'levels' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
-          }`}
-        >
-          Niveaux de stock ({physicalProducts.length})
         </button>
         <button
           type="button"
@@ -322,15 +467,24 @@ export function AdminStockImport({
                     </p>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={onGoToMissingPhotos}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold whitespace-nowrap shrink-0"
-                >
-                  <Camera className="w-3.5 h-3.5" />
-                  <span>Ajouter les photos maintenant</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </button>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setSubTab('levels')}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-emerald-700 bg-white hover:bg-emerald-100 text-emerald-900 text-xs font-semibold whitespace-nowrap"
+                  >
+                    <span>Modifier quantités &amp; prix</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onGoToMissingPhotos}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold whitespace-nowrap"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Ajouter les photos maintenant</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -456,7 +610,8 @@ export function AdminStockImport({
                           <th className="py-2 px-3">SKU / Code</th>
                           <th className="py-2 px-3">Nom de l’article</th>
                           <th className="py-2 px-3">Catégorie</th>
-                          <th className="py-2 px-3 text-right">Prix (DZD)</th>
+                          <th className="py-2 px-3 text-right">Prix d’achat (DZD)</th>
+                          <th className="py-2 px-3 text-right">Prix de vente (DZD)</th>
                           <th className="py-2 px-3 text-right">Stock</th>
                         </tr>
                       </thead>
@@ -466,7 +621,12 @@ export function AdminStockImport({
                             <td className="py-2 px-3 font-mono text-slate-600">{item.sku}</td>
                             <td className="py-2 px-3 font-medium text-slate-900">{item.name}</td>
                             <td className="py-2 px-3 text-slate-600">{item.categoryName || 'Défaut'}</td>
-                            <td className="py-2 px-3 text-right font-mono tabular-nums">{formatDzd(item.priceDzd)}</td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600">
+                              {formatDzd(item.costPriceDzd || 0)}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums font-semibold text-slate-900">
+                              {formatDzd(item.priceDzd)}
+                            </td>
                             <td className="py-2 px-3 text-right font-mono tabular-nums">{item.stockQuantity}</td>
                           </tr>
                         ))}
@@ -596,88 +756,464 @@ export function AdminStockImport({
       )}
 
       {subTab === 'levels' && (
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="p-4 border-b border-slate-200 flex items-center justify-between gap-3">
-            <div className="inline-flex p-1 bg-slate-100 rounded-lg text-xs">
-              {[
-                { id: 'all', label: 'Tous' },
-                { id: 'low', label: 'Stock faible' },
-                { id: 'out', label: 'Rupture' },
-              ].map((f) => (
-                <button
-                  key={f.id}
-                  type="button"
-                  onClick={() => setStockFilter(f.id as any)}
-                  className={`px-3 py-1 rounded-md font-medium ${
-                    stockFilter === f.id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
-                  }`}
-                >
-                  {f.label}
-                </button>
-              ))}
+        <div className="space-y-4">
+          {stockFeedback && (
+            <div
+              className={`p-3 rounded-xl border text-xs font-medium flex items-center justify-between gap-2 ${
+                stockFeedback.type === 'ok'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-red-50 border-red-200 text-red-700'
+              }`}
+            >
+              <span>{stockFeedback.msg}</span>
+              <button
+                type="button"
+                onClick={() => setStockFeedback(null)}
+                className="font-semibold underline shrink-0"
+              >
+                Fermer
+              </button>
             </div>
-            <span className="text-xs text-slate-500">
-              Seuil global par défaut : <strong className="font-mono">{stockData?.globalLowStockThreshold ?? 10}</strong> u.
-            </span>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left">
-              <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
-                <tr>
-                  <th className="py-3 px-4">Article</th>
-                  <th className="py-3 px-4 text-right">Stock actuel</th>
-                  <th className="py-3 px-4 text-right">Seuil alerte</th>
-                  <th className="py-3 px-4 text-right">Ajustement rapide</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredLevels.map((p) => (
-                  <tr key={p.id}>
-                    <td className="py-3 px-4">
-                      <p className="font-medium text-slate-900">{p.name}</p>
-                      <p className="text-xs font-mono text-slate-400">{p.sku}</p>
-                    </td>
-                    <td className="py-3 px-4 text-right font-mono font-bold tabular-nums">
-                      <span className={p.isLowStock ? 'text-red-600' : 'text-slate-900'}>
-                        {p.stockQuantity}
+          )}
+
+          {/* Financial Margin Donut Widget (Vert / Rouge / Bleu) - live updated with draft edits */}
+          <FinancialMarginWidget
+            items={liveFinancialItems}
+            hasUnsavedDrafts={dirtyProductIds.length > 0}
+          />
+
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <div className="inline-flex p-1 bg-slate-100 rounded-lg text-xs">
+                  {[
+                    { id: 'all', label: 'Tous' },
+                    { id: 'low', label: 'Stock faible' },
+                    { id: 'out', label: 'Rupture' },
+                  ].map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setStockFilter(f.id as any)}
+                      className={`px-3 py-1 rounded-md font-medium ${
+                        stockFilter === f.id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+                <select
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  className="px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 bg-white text-slate-700"
+                  aria-label="Filtrer par catégorie"
+                >
+                  <option value="all">Toutes les catégories</option>
+                  {categories.map((c) => (
+                    <option key={c.id} value={String(c.id)}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="search"
+                    value={levelSearch}
+                    onChange={(e) => setLevelSearch(e.target.value)}
+                    placeholder="Rechercher article, SKU..."
+                    className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-300 w-52"
+                  />
+                </div>
+              </div>
+
+              {dirtyProductIds.length > 0 ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={savingAll}
+                    onClick={() => setDraftRows({})}
+                    className="px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    Annuler ({dirtyProductIds.length})
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingAll}
+                    onClick={handleSaveAllDirty}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold shadow-sm"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>
+                      {savingAll
+                        ? 'Enregistrement...'
+                        : `Enregistrer tout (${dirtyProductIds.length} modifié${dirtyProductIds.length > 1 ? 's' : ''})`}
+                    </span>
+                  </button>
+                </div>
+              ) : (
+                <span className="text-xs text-slate-500">
+                  Modifiez directement la quantité, le <strong>prix d’achat</strong> et le{' '}
+                  <strong>prix de vente</strong> (Entrée ou <strong>Enregistrer</strong>).
+                </span>
+              )}
+            </div>
+
+            {/* Mobile Cards for Inline Stock & Prices */}
+            <div className="divide-y divide-slate-100 lg:hidden">
+              {filteredLevels.map((p) => {
+                const draft = getRowDraft(p);
+                const costNum = Number(draft.costPriceDzd) || 0;
+                const saleNum = Number(draft.priceDzd) || 0;
+                const margin = saleNum - costNum;
+                const marginPct = costNum > 0 ? Math.round((margin / costNum) * 100) : null;
+                const isDirty = Boolean(draftRows[p.id]);
+                const onKeyEnter = (e: React.KeyboardEvent) => {
+                  if (e.key === 'Enter') handleSaveInlineRow(p);
+                };
+                return (
+                  <div key={p.id} className={`p-4 space-y-3 ${isDirty ? 'bg-blue-50/40' : ''}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="font-semibold text-sm text-slate-900">{p.name}</p>
+                        <p className="text-[11px] font-mono text-slate-400">
+                          {p.sku} {p.barcode ? `· ${p.barcode}` : ''}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          printProductThermalLabels(
+                            [
+                              {
+                                name: p.name,
+                                sku: p.sku,
+                                barcode: p.barcode || p.sku,
+                                priceDzd: saleNum,
+                                copies: 1,
+                              },
+                            ],
+                            storeSettings,
+                          )
+                        }
+                        title="Imprimer étiquette thermique"
+                        className="p-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100"
+                      >
+                        <Printer className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-500 mb-0.5">
+                          Quantité stock
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={draft.stockQuantity}
+                          onChange={(e) => updateRowDraft(p, 'stockQuantity', e.target.value)}
+                          onKeyDown={onKeyEnter}
+                          className="w-full px-2 py-1.5 font-mono text-xs font-bold rounded-lg border border-slate-300 bg-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-500 mb-0.5">
+                          Prix d’achat (DZD)
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={draft.costPriceDzd}
+                          onChange={(e) => updateRowDraft(p, 'costPriceDzd', e.target.value)}
+                          onKeyDown={onKeyEnter}
+                          className="w-full px-2 py-1.5 font-mono text-xs rounded-lg border border-slate-300 bg-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-500 mb-0.5">
+                          Prix de vente (DZD)
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={draft.priceDzd}
+                          onChange={(e) => updateRowDraft(p, 'priceDzd', e.target.value)}
+                          onKeyDown={onKeyEnter}
+                          className="w-full px-2 py-1.5 font-mono text-xs font-semibold rounded-lg border border-slate-300 bg-white"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <span
+                        className={`text-xs font-mono font-semibold ${
+                          margin >= 0 ? 'text-emerald-700' : 'text-red-600'
+                        }`}
+                      >
+                        Marge : {formatDzd(margin)}
+                        {marginPct !== null ? ` (${marginPct >= 0 ? '+' : ''}${marginPct}%)` : ''}
                       </span>
-                    </td>
-                    <td className="py-3 px-4 text-right font-mono text-xs text-slate-600 tabular-nums">
-                      {p.effectiveLowStockThreshold}
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      <div className="inline-flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5">
                         <button
                           type="button"
                           disabled={adjustingId === p.id || p.stockQuantity <= 0}
                           onClick={() => handleQuickAdjust(p.id, -1)}
-                          className="px-2.5 py-1 rounded border border-slate-300 text-xs font-mono hover:bg-slate-50"
+                          className="px-2 py-1 rounded border border-slate-300 bg-white text-xs font-mono"
                         >
                           -1
                         </button>
                         <button
                           type="button"
                           disabled={adjustingId === p.id}
-                          onClick={() => handleQuickAdjust(p.id, 5)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-900 text-white text-xs font-mono hover:bg-slate-800"
+                          onClick={() => handleQuickAdjust(p.id, 1)}
+                          className="px-2 py-1 rounded border border-slate-300 bg-white text-xs font-mono"
                         >
-                          <Plus className="w-3 h-3" />5
+                          +1
                         </button>
                         <button
                           type="button"
                           disabled={adjustingId === p.id}
-                          onClick={() => handleQuickAdjust(p.id, 20)}
-                          className="px-2.5 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700 text-xs font-mono hover:bg-blue-100"
+                          onClick={() => handleQuickAdjust(p.id, 5)}
+                          className="px-2 py-1 rounded border border-slate-300 bg-white text-xs font-mono"
                         >
-                          +20
+                          +5
+                        </button>
+                        <button
+                          type="button"
+                          disabled={savingInlineId === p.id}
+                          onClick={() => handleSaveInlineRow(p)}
+                          className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold ${
+                            isDirty
+                              ? 'bg-blue-700 text-white hover:bg-blue-800'
+                              : 'bg-slate-900 text-white hover:bg-slate-800'
+                          }`}
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          <span>{savingInlineId === p.id ? '...' : 'Enregistrer'}</span>
                         </button>
                       </div>
-                    </td>
+                    </div>
+                  </div>
+                );
+              })}
+              {filteredLevels.length === 0 && (
+                <div className="py-10 text-center text-sm text-slate-500">
+                  Aucun article trouvé dans le stock.
+                </div>
+              )}
+            </div>
+
+            {/* Desktop Inline Stock & Pricing Table */}
+            <div className="hidden lg:block overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
+                  <tr>
+                    <th className="py-3 px-4">Article</th>
+                    <th className="py-3 px-3 text-right">Quantité stock</th>
+                    <th className="py-3 px-3 text-right">Prix d’achat (DZD)</th>
+                    <th className="py-3 px-3 text-right">Prix de vente (DZD)</th>
+                    <th className="py-3 px-3 text-right">Marge</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredLevels.map((p) => {
+                    const draft = getRowDraft(p);
+                    const costNum = Number(draft.costPriceDzd) || 0;
+                    const saleNum = Number(draft.priceDzd) || 0;
+                    const margin = saleNum - costNum;
+                    const marginPct = costNum > 0 ? Math.round((margin / costNum) * 100) : null;
+                    const isDirty = Boolean(draftRows[p.id]);
+                    const onKeyEnter = (e: React.KeyboardEvent) => {
+                      if (e.key === 'Enter') handleSaveInlineRow(p);
+                    };
+                    return (
+                      <tr key={p.id} className={isDirty ? 'bg-blue-50/40' : 'hover:bg-slate-50'}>
+                        <td className="py-3 px-4">
+                          <p className="font-medium text-slate-900">{p.name}</p>
+                          <p className="text-xs font-mono text-slate-400">
+                            {p.sku} {p.barcode ? `· ${p.barcode}` : ''} · Seuil {p.effectiveLowStockThreshold}
+                          </p>
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              disabled={adjustingId === p.id || p.stockQuantity <= 0}
+                              onClick={() => handleQuickAdjust(p.id, -1)}
+                              className="px-2 py-1 rounded border border-slate-300 bg-white text-xs font-mono hover:bg-slate-100"
+                              title="Retirer 1 unité"
+                            >
+                              -1
+                            </button>
+                            <input
+                              type="number"
+                              min={0}
+                              value={draft.stockQuantity}
+                              onChange={(e) => updateRowDraft(p, 'stockQuantity', e.target.value)}
+                              onKeyDown={onKeyEnter}
+                              aria-label={`Quantité stock ${p.name}`}
+                              className={`w-20 px-2 py-1 text-right font-mono font-bold text-xs rounded border border-slate-300 bg-white tabular-nums ${
+                                Number(draft.stockQuantity) <= p.effectiveLowStockThreshold
+                                  ? 'text-red-600 border-red-300'
+                                  : 'text-slate-900'
+                              }`}
+                            />
+                            <button
+                              type="button"
+                              disabled={adjustingId === p.id}
+                              onClick={() => handleQuickAdjust(p.id, 1)}
+                              className="px-2 py-1 rounded border border-slate-300 bg-white text-xs font-mono hover:bg-slate-100"
+                              title="Ajouter 1 unité"
+                            >
+                              +1
+                            </button>
+                            <button
+                              type="button"
+                              disabled={adjustingId === p.id}
+                              onClick={() => handleQuickAdjust(p.id, 5)}
+                              className="inline-flex items-center px-2 py-1 rounded border border-slate-300 bg-white text-xs font-mono hover:bg-slate-100"
+                              title="Ajouter 5 unités"
+                            >
+                              <Plus className="w-3 h-3" />5
+                            </button>
+                          </div>
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          <input
+                            type="number"
+                            min={0}
+                            value={draft.costPriceDzd}
+                            onChange={(e) => updateRowDraft(p, 'costPriceDzd', e.target.value)}
+                            onKeyDown={onKeyEnter}
+                            aria-label={`Prix d'achat ${p.name}`}
+                            className="w-28 px-2.5 py-1 text-right font-mono text-xs rounded border border-slate-300 bg-white tabular-nums"
+                          />
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          <input
+                            type="number"
+                            min={0}
+                            value={draft.priceDzd}
+                            onChange={(e) => updateRowDraft(p, 'priceDzd', e.target.value)}
+                            onKeyDown={onKeyEnter}
+                            aria-label={`Prix de vente ${p.name}`}
+                            className="w-28 px-2.5 py-1 text-right font-mono font-semibold text-xs rounded border border-slate-300 bg-white tabular-nums"
+                          />
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono text-xs tabular-nums">
+                          <span className={`font-semibold ${margin >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                            {formatDzd(margin)}
+                          </span>
+                          {marginPct !== null && (
+                            <span className="block text-[10px] text-slate-400">
+                              {marginPct >= 0 ? `+${marginPct}%` : `${marginPct}%`}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={savingInlineId === p.id}
+                              onClick={() => handleSaveInlineRow(p)}
+                              className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold ${
+                                isDirty
+                                  ? 'bg-blue-700 text-white hover:bg-blue-800'
+                                  : 'bg-slate-900 text-white hover:bg-slate-800'
+                              }`}
+                            >
+                              <Save className="w-3.5 h-3.5" />
+                              <span>{savingInlineId === p.id ? '...' : 'Enregistrer'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                printProductThermalLabels(
+                                  [
+                                    {
+                                      name: p.name,
+                                      sku: p.sku,
+                                      barcode: p.barcode || p.sku,
+                                      priceDzd: saleNum,
+                                      copies: 1,
+                                    },
+                                  ],
+                                  storeSettings,
+                                )
+                              }
+                              title="Imprimer étiquette thermique"
+                              className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filteredLevels.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="py-10 text-center text-sm text-slate-500">
+                        Aucun article trouvé dans le stock.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
+
+          {/* Recent Stock Movements Audit Trail */}
+          {(stockData?.movements || []).length > 0 && (
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-200 flex items-center gap-2">
+                <History className="w-4 h-4 text-slate-500" />
+                <h3 className="font-display font-semibold text-sm text-slate-900">
+                  Derniers mouvements de stock
+                </h3>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
+                    <tr>
+                      <th className="py-2.5 px-4">Date</th>
+                      <th className="py-2.5 px-4">Article</th>
+                      <th className="py-2.5 px-4 text-right">Variation</th>
+                      <th className="py-2.5 px-4 text-right">Avant → Après</th>
+                      <th className="py-2.5 px-4">Motif</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(stockData?.movements || []).slice(0, 15).map((m: any) => {
+                      const info = productNameById.get(m.productId);
+                      return (
+                        <tr key={m.id}>
+                          <td className="py-2 px-4 tabular-nums text-slate-500">
+                            {new Date(m.createdAt).toLocaleString('fr-FR')}
+                          </td>
+                          <td className="py-2 px-4 font-medium text-slate-900">
+                            {info ? info.name : `Produit #${m.productId}`}
+                          </td>
+                          <td
+                            className={`py-2 px-4 text-right font-mono font-semibold tabular-nums ${
+                              m.delta > 0 ? 'text-emerald-700' : m.delta < 0 ? 'text-red-600' : 'text-slate-500'
+                            }`}
+                          >
+                            {m.delta > 0 ? `+${m.delta}` : m.delta}
+                          </td>
+                          <td className="py-2 px-4 text-right font-mono text-slate-600 tabular-nums">
+                            {m.previousQty} → {m.newQty}
+                          </td>
+                          <td className="py-2 px-4 text-slate-600">{m.reason}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildWhatsAppOrderUrl,
+  calculateFinancialSummary,
   calculatePromoDiscount,
   calculateReviewSummary,
   computeEffectiveLowStockThreshold,
@@ -152,3 +153,27 @@ test('Universal stock parser parses CSV, JSON, XML, and SQL dumps + differential
   assert.equal(parsedXml.format, 'xml');
   assert.equal(parsedXml.totalRows, 1);
 });
+
+test('Financial summary calculates total cost, sale valuation, gross margin, ROI and missing costs', () => {
+  const summary = calculateFinancialSummary([
+    { stockQuantity: 10, costPriceDzd: 2000, priceDzd: 3000, productType: 'physical' },
+    { stockQuantity: 5, costPriceDzd: 4000, priceDzd: 6000, productType: 'physical' },
+    { stockQuantity: 2, costPriceDzd: 0, priceDzd: 1500, productType: 'physical' },
+    { stockQuantity: 99, costPriceDzd: 1000, priceDzd: 5000, productType: 'digital' },
+  ]);
+
+  assert.equal(summary.totalUnits, 17);
+  assert.equal(summary.valuedProductsCount, 3);
+  assert.equal(summary.productsMissingCostCount, 1);
+  assert.equal(summary.lossProductsCount, 0);
+  // Cost = 10*2000 + 5*4000 + 2*0 = 40,000
+  assert.equal(summary.totalCostValueDzd, 40000);
+  // Sale = 10*3000 + 5*6000 + 2*1500 = 63,000
+  assert.equal(summary.totalSaleValueDzd, 63000);
+  // Margin = 63,000 - 40,000 = 23,000
+  assert.equal(summary.totalGrossMarginDzd, 23000);
+  assert.equal(summary.positiveMarginDzd, 23000);
+  assert.equal(summary.marginRatePercent, 36.5);
+  assert.equal(summary.roiPercent, 57.5);
+});
+

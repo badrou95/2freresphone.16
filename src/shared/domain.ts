@@ -244,3 +244,70 @@ export function toCsv(headers: string[], rows: (string | number | boolean | null
   };
   return [headers.map(escapeCell).join(','), ...rows.map((r) => r.map(escapeCell).join(','))].join('\n');
 }
+
+export interface StockFinancialItem {
+  stockQuantity: number;
+  costPriceDzd: number;
+  priceDzd: number;
+  productType?: string;
+}
+
+export interface FinancialMarginSummary {
+  totalUnits: number;
+  valuedProductsCount: number;
+  productsMissingCostCount: number;
+  lossProductsCount: number;
+  totalCostValueDzd: number;
+  totalSaleValueDzd: number;
+  totalGrossMarginDzd: number;
+  positiveMarginDzd: number;
+  marginRatePercent: number;
+  roiPercent: number;
+}
+
+export function calculateFinancialSummary(items: StockFinancialItem[]): FinancialMarginSummary {
+  let totalUnits = 0;
+  let valuedProductsCount = 0;
+  let productsMissingCostCount = 0;
+  let lossProductsCount = 0;
+  let totalCostValueDzd = 0;
+  let totalSaleValueDzd = 0;
+
+  for (const item of items) {
+    if (item.productType === 'digital') continue;
+    const qty = Number.isFinite(Number(item.stockQuantity)) ? Math.max(0, Number(item.stockQuantity)) : 0;
+    const cost = Number.isFinite(Number(item.costPriceDzd)) ? Math.max(0, Number(item.costPriceDzd)) : 0;
+    const sale = Number.isFinite(Number(item.priceDzd)) ? Math.max(0, Number(item.priceDzd)) : 0;
+
+    if (qty > 0) {
+      valuedProductsCount++;
+      if (cost <= 0) productsMissingCostCount++;
+      if (cost > 0 && sale < cost) lossProductsCount++;
+    }
+
+    totalUnits += qty;
+    totalCostValueDzd += qty * cost;
+    totalSaleValueDzd += qty * sale;
+  }
+
+  const totalGrossMarginDzd = totalSaleValueDzd - totalCostValueDzd;
+  const positiveMarginDzd = Math.max(0, totalGrossMarginDzd);
+  const marginRatePercent =
+    totalSaleValueDzd > 0 ? Math.round((totalGrossMarginDzd / totalSaleValueDzd) * 1000) / 10 : 0;
+  const roiPercent =
+    totalCostValueDzd > 0 ? Math.round((totalGrossMarginDzd / totalCostValueDzd) * 1000) / 10 : 0;
+
+  return {
+    totalUnits,
+    valuedProductsCount,
+    productsMissingCostCount,
+    lossProductsCount,
+    totalCostValueDzd: Math.round(totalCostValueDzd),
+    totalSaleValueDzd: Math.round(totalSaleValueDzd),
+    totalGrossMarginDzd: Math.round(totalGrossMarginDzd),
+    positiveMarginDzd: Math.round(positiveMarginDzd),
+    marginRatePercent,
+    roiPercent,
+  };
+}
+

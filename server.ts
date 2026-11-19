@@ -1244,6 +1244,70 @@ export function createApp() {
     }
   });
 
+  app.delete('/api/admin/orders/:id', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const orderId = Number(req.params.id);
+      if (!Number.isInteger(orderId)) {
+        return res.status(400).json({ error: 'Identifiant de commande invalide.' });
+      }
+
+      const [existing] = await db.select().from(orders).where(eq(orders.id, orderId));
+      if (!existing) {
+        return res.status(404).json({ error: 'Commande introuvable.' });
+      }
+
+      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
+      const actor = req.adminUser?.email || 'admin';
+      let restoredUnits = 0;
+
+      // Restore stock automatically if stock had been deducted for this order
+      if (existing.stockDeducted) {
+        for (const item of items) {
+          if (item.productId && item.productType === 'physical' && item.quantity > 0) {
+            const [prod] = await db.select().from(products).where(eq(products.id, item.productId));
+            if (prod) {
+              const newQty = prod.stockQuantity + item.quantity;
+              await db
+                .update(products)
+                .set({ stockQuantity: newQty, updatedAt: new Date() })
+                .where(eq(products.id, prod.id));
+              await db.insert(stockMovements).values({
+                productId: prod.id,
+                orderId: null,
+                delta: item.quantity,
+                previousQty: prod.stockQuantity,
+                newQty,
+                reason: `Restauration auto (suppression commande ${existing.reference})`,
+                createdBy: actor,
+              });
+              await evaluateProductLowStock(prod.id);
+              restoredUnits += item.quantity;
+            }
+          }
+        }
+      }
+
+      // Preserve movement audit trail while detaching FK to deleted order
+      await db.update(stockMovements).set({ orderId: null }).where(eq(stockMovements.orderId, orderId));
+      await db.delete(sales).where(eq(sales.orderId, orderId));
+      await db.delete(returns).where(eq(returns.orderId, orderId));
+      await db.delete(digitalDeliveries).where(eq(digitalDeliveries.orderId, orderId));
+      await db.delete(orderStatusHistory).where(eq(orderStatusHistory.orderId, orderId));
+      await db.delete(orderItems).where(eq(orderItems.orderId, orderId));
+      await db.delete(orders).where(eq(orders.id, orderId));
+
+      return res.json({
+        deleted: true,
+        reference: existing.reference,
+        stockWasDeducted: existing.stockDeducted,
+        restoredUnits,
+      });
+    } catch (error) {
+      console.error('Admin delete order error:', error);
+      return res.status(500).json({ error: 'Erreur lors de la suppression de la commande.' });
+    }
+  });
+
   // 3. Sales Ledger
   app.get('/api/admin/sales', requireAdmin, async (_req, res) => {
     try {
@@ -1699,6 +1763,127 @@ export function createApp() {
     } catch (error) {
       console.error('Stock adjust error:', error);
       return res.status(500).json({ error: 'Erreur lors de l’ajustement du stock.' });
+    }
+  });
+
+  // Inline Stock Editor: update stockQuantity, costPriceDzd (prix d'achat), priceDzd (prix de vente), threshold & barcode
+  app.patch('/api/admin/stock/product/:id', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const productId = Number(req.params.id);
+      if (!Number.isInteger(productId)) {
+        return res.status(400).json({ error: 'Identifiant produit invalide.' });
+      }
+      const [prod] = await db.select().from(products).where(eq(products.id, productId));
+      if (!prod) return res.status(404).json({ error: 'Produit introuvable.' });
+
+      const b = req.body || {};
+      const parseNonNegInt = (val: unknown, fallback: number): number => {
+        if (val === undefined || val === null || val === '') return fallback;
+        const n = Number(val);
+        return Number.isFinite(n) ? Math.max(0, Math.round(n)) : fallback;
+      };
+      const nextQty = parseNonNegInt(b.stockQuantity, prod.stockQuantity);
+      const nextCost = parseNonNegInt(b.costPriceDzd, prod.costPriceDzd);
+      const nextPrice = parseNonNegInt(b.priceDzd, prod.priceDzd);
+      const nextThreshold =
+        b.lowStockThreshold !== undefined
+          ? b.lowStockThreshold === '' || b.lowStockThreshold === null
+            ? null
+            : parseNonNegInt(b.lowStockThreshold, prod.lowStockThreshold ?? 10)
+          : prod.lowStockThreshold;
+      const nextBarcode =
+        b.barcode !== undefined
+          ? b.barcode && String(b.barcode).trim()
+            ? String(b.barcode).trim()
+            : null
+          : prod.barcode;
+
+      const [updated] = await db
+        .update(products)
+        .set({
+          stockQuantity: nextQty,
+          costPriceDzd: nextCost,
+          priceDzd: nextPrice,
+          lowStockThreshold: nextThreshold,
+          barcode: nextBarcode,
+          updatedAt: new Date(),
+        })
+        .where(eq(products.id, productId))
+        .returning();
+
+      const actualDelta = nextQty - prod.stockQuantity;
+      if (actualDelta !== 0) {
+        await db.insert(stockMovements).values({
+          productId: prod.id,
+          delta: actualDelta,
+          previousQty: prod.stockQuantity,
+          newQty: nextQty,
+          reason: String(b.reason || 'Modification directe gestion de stock').trim(),
+          createdBy: req.adminUser?.email || 'admin',
+        });
+      }
+
+      const alert = await evaluateProductLowStock(prod.id);
+      return res.json({ product: updated, alert });
+    } catch (error) {
+      console.error('Inline stock update error:', error);
+      return res.status(500).json({ error: 'Erreur lors de la mise à jour du stock et des prix.' });
+    }
+  });
+
+  // Batch Inline Stock & Pricing Update
+  app.patch('/api/admin/stock/batch', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const items = Array.isArray(req.body?.items) ? req.body.items : [];
+      if (items.length === 0) {
+        return res.status(400).json({ error: 'Aucune modification à enregistrer.' });
+      }
+      const parseNonNegInt = (val: unknown, fallback: number): number => {
+        if (val === undefined || val === null || val === '') return fallback;
+        const n = Number(val);
+        return Number.isFinite(n) ? Math.max(0, Math.round(n)) : fallback;
+      };
+
+      let updatedCount = 0;
+      for (const item of items) {
+        const productId = Number(item?.productId);
+        if (!Number.isInteger(productId)) continue;
+        const [prod] = await db.select().from(products).where(eq(products.id, productId));
+        if (!prod) continue;
+
+        const nextQty = parseNonNegInt(item.stockQuantity, prod.stockQuantity);
+        const nextCost = parseNonNegInt(item.costPriceDzd, prod.costPriceDzd);
+        const nextPrice = parseNonNegInt(item.priceDzd, prod.priceDzd);
+
+        await db
+          .update(products)
+          .set({
+            stockQuantity: nextQty,
+            costPriceDzd: nextCost,
+            priceDzd: nextPrice,
+            updatedAt: new Date(),
+          })
+          .where(eq(products.id, productId));
+
+        const actualDelta = nextQty - prod.stockQuantity;
+        if (actualDelta !== 0) {
+          await db.insert(stockMovements).values({
+            productId: prod.id,
+            delta: actualDelta,
+            previousQty: prod.stockQuantity,
+            newQty: nextQty,
+            reason: 'Mise à jour groupée gestion de stock',
+            createdBy: req.adminUser?.email || 'admin',
+          });
+        }
+        await evaluateProductLowStock(prod.id);
+        updatedCount++;
+      }
+
+      return res.json({ updatedCount });
+    } catch (error) {
+      console.error('Batch stock update error:', error);
+      return res.status(500).json({ error: 'Erreur lors de l’enregistrement groupé du stock.' });
     }
   });
 
@@ -2450,9 +2635,15 @@ export function createApp() {
       const [updated] = await db
         .update(socialLinks)
         .set({
-          label: b.label ?? existing.label,
-          urlOrHandle: b.urlOrHandle ?? existing.urlOrHandle,
-          pixelId: b.pixelId !== undefined ? b.pixelId : existing.pixelId,
+          platform: b.platform !== undefined ? String(b.platform).trim() : existing.platform,
+          label: b.label !== undefined ? String(b.label).trim() : existing.label,
+          urlOrHandle: b.urlOrHandle !== undefined ? String(b.urlOrHandle).trim() : existing.urlOrHandle,
+          pixelId:
+            b.pixelId !== undefined
+              ? b.pixelId && String(b.pixelId).trim()
+                ? String(b.pixelId).trim()
+                : null
+              : existing.pixelId,
           isActive: b.isActive !== undefined ? Boolean(b.isActive) : existing.isActive,
         })
         .where(eq(socialLinks.id, id))

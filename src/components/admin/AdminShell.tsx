@@ -9,6 +9,7 @@ import {
   LogOut,
   Menu,
   Package,
+  Printer,
   RefreshCw,
   RotateCcw,
   Settings,
@@ -41,6 +42,7 @@ import {
   AdminSettings,
   AdminSocialLinks,
 } from './AdminLogisticsAndSettings';
+import { AdminPrinter } from './AdminPrinter';
 
 interface AdminShellProps {
   publicSettings: StoreSettings;
@@ -61,6 +63,7 @@ type AdminTab =
   | 'promotions'
   | 'digital'
   | 'social'
+  | 'printer'
   | 'settings';
 
 export function AdminShell({
@@ -74,7 +77,7 @@ export function AdminShell({
 
   // Contextual sub-navigation flags
   const [productsOnlyMissingPhotos, setProductsOnlyMissingPhotos] = useState(false);
-  const [stockInitialSubTab, setStockInitialSubTab] = useState<'import' | 'levels' | 'alerts'>('import');
+  const [stockInitialSubTab, setStockInitialSubTab] = useState<'import' | 'levels' | 'alerts'>('levels');
 
   // Admin datasets loaded from real PostgreSQL APIs
   const [loadingData, setLoadingData] = useState(false);
@@ -174,7 +177,7 @@ export function AdminShell({
       setProductsOnlyMissingPhotos(Boolean(extra?.onlyMissingPhotos));
     }
     if (tab === 'stock') {
-      setStockInitialSubTab(extra?.subTab || 'import');
+      setStockInitialSubTab(extra?.subTab || 'levels');
     }
     setActiveTab(tab as AdminTab);
     setSidebarOpen(false);
@@ -317,6 +320,7 @@ export function AdminShell({
       items: [
         { id: 'carriers', label: 'Transporteurs & Tarifs', icon: Truck },
         { id: 'social', label: 'Réseaux sociaux', icon: Globe },
+        { id: 'printer', label: 'Imprimante & Étiquettes', icon: Printer },
         { id: 'settings', label: 'Paramètres & Logo', icon: Settings },
       ],
     },
@@ -458,18 +462,34 @@ export function AdminShell({
           )}
 
           {activeTab === 'overview' && (
-            <AdminOverview data={dashboard} onNavigateTab={handleNavigateTab} />
+            <AdminOverview
+              data={dashboard}
+              products={products}
+              onNavigateTab={handleNavigateTab}
+            />
           )}
           {activeTab === 'orders' && (
-            <AdminOrders orders={orders} carriers={carriers} onRefresh={handleRefresh} />
+            <AdminOrders
+              orders={orders}
+              carriers={carriers}
+              storeSettings={settingsData?.settings || publicSettings}
+              onRefresh={handleRefresh}
+            />
           )}
-          {activeTab === 'sales' && <AdminSales sales={sales} />}
+          {activeTab === 'sales' && (
+            <AdminSales
+              sales={sales}
+              orders={orders}
+              storeSettings={settingsData?.settings || publicSettings}
+            />
+          )}
           {activeTab === 'products' && (
             <AdminProducts
               key={productsOnlyMissingPhotos ? 'missing' : 'all'}
               products={products}
               categories={categories}
               globalLowStockThreshold={globalThreshold}
+              storeSettings={settingsData?.settings || publicSettings}
               initialOnlyMissingPhotos={productsOnlyMissingPhotos}
               onRefresh={handleRefresh}
             />
@@ -480,6 +500,7 @@ export function AdminShell({
               products={products}
               categories={categories}
               stockData={stockData}
+              storeSettings={settingsData?.settings || publicSettings}
               initialSubTab={stockInitialSubTab}
               onRefresh={handleRefresh}
               onGoToMissingPhotos={() => handleNavigateTab('products', { onlyMissingPhotos: true })}
@@ -507,6 +528,13 @@ export function AdminShell({
           )}
           {activeTab === 'social' && (
             <AdminSocialLinks socialLinks={socialLinks} onRefresh={handleRefresh} />
+          )}
+          {activeTab === 'printer' && (
+            <AdminPrinter
+              settings={settingsData?.settings || publicSettings}
+              products={products}
+              orders={orders}
+            />
           )}
           {activeTab === 'settings' && (
             <AdminSettings

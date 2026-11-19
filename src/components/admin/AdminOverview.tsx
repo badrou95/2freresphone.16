@@ -9,13 +9,15 @@ import {
   YAxis,
 } from 'recharts';
 import { formatDzd, ORDER_STATUS_LABELS, OrderStatus } from '../../shared/domain';
+import { FinancialMarginWidget } from './FinancialMarginWidget';
 
 interface AdminOverviewProps {
   data: any;
+  products?: any[];
   onNavigateTab: (tab: string, extra?: any) => void;
 }
 
-export function AdminOverview({ data, onNavigateTab }: AdminOverviewProps) {
+export function AdminOverview({ data, products = [], onNavigateTab }: AdminOverviewProps) {
   if (!data) return null;
   const { kpis, chartSeries, topWilayas, activeLowStockAlerts, recentOrders } = data;
 
@@ -168,6 +170,12 @@ export function AdminOverview({ data, onNavigateTab }: AdminOverviewProps) {
           </p>
         </div>
       </div>
+
+      {/* Financial Margin Summary Donut Chart (Vert / Rouge / Bleu) */}
+      <FinancialMarginWidget
+        items={products}
+        onGoToStock={() => onNavigateTab('stock', { subTab: 'levels' })}
+      />
 
       {/* Charts + Top Wilayas */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">

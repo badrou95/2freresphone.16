@@ -6,6 +6,7 @@ import {
   Download,
   Lock,
   Plus,
+  Receipt,
   RotateCcw,
   Search,
   ShieldAlert,
@@ -15,13 +16,22 @@ import {
   X,
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
+import { loadPrinterConfig, printPurchaseReceipt } from '../../lib/printer';
 import { formatDzd, toCsv } from '../../shared/domain';
 import { StarRating } from '../StarRating';
 
 // ---------------------------------------------------------------------------
 // 3. SALES LEDGER
 // ---------------------------------------------------------------------------
-export function AdminSales({ sales }: { sales: any[] }) {
+export function AdminSales({
+  sales,
+  orders = [],
+  storeSettings,
+}: {
+  sales: any[];
+  orders?: any[];
+  storeSettings?: any;
+}) {
   const [search, setSearch] = useState('');
 
   const filtered = useMemo(() => {
@@ -130,12 +140,13 @@ export function AdminSales({ sales }: { sales: any[] }) {
                 <th className="py-3 px-4 font-semibold">Wilaya</th>
                 <th className="py-3 px-4 font-semibold text-right">Encaissé</th>
                 <th className="py-3 px-4 font-semibold text-right">Marge estimée</th>
+                <th className="py-3 px-4 font-semibold text-right">Reçu</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-10 text-center text-xs text-slate-500">
+                  <td colSpan={7} className="py-10 text-center text-xs text-slate-500">
                     Aucune vente enregistrée. Une vente est automatiquement comptabilisée lorsqu’une commande passe au statut « Livrée ».
                   </td>
                 </tr>
@@ -155,6 +166,49 @@ export function AdminSales({ sales }: { sales: any[] }) {
                     </td>
                     <td className="py-3 px-4 text-right font-mono font-semibold text-emerald-700 tabular-nums">
                       {formatDzd(s.estimatedMarginDzd)}
+                    </td>
+                    <td className="py-3 px-4 text-right">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const matchedOrder = orders.find(
+                            (o) => o.id === s.orderId || o.reference === s.orderReference,
+                          );
+                          const printable = matchedOrder || {
+                            reference: s.orderReference,
+                            createdAt: s.recordedAt,
+                            customerName: s.customerName,
+                            customerPhone: '',
+                            wilayaName: s.wilayaName,
+                            commune: '',
+                            address: '',
+                            deliveryType: 'domicile',
+                            paymentMethod: 'cod',
+                            subtotalDzd: s.itemsRevenueDzd,
+                            discountDzd: s.discountDzd,
+                            shippingFeeDzd: s.shippingFeeDzd,
+                            totalDzd: s.totalCollectedDzd,
+                            items: [
+                              {
+                                productName: `Vente ${s.orderReference}`,
+                                quantity: 1,
+                                unitPriceDzd: s.itemsRevenueDzd,
+                                lineTotalDzd: s.itemsRevenueDzd,
+                              },
+                            ],
+                          };
+                          printPurchaseReceipt(
+                            printable,
+                            storeSettings || {},
+                            loadPrinterConfig(),
+                          );
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700"
+                        title="Imprimer le bon d’achat / reçu"
+                      >
+                        <Receipt className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Bon d’achat</span>
+                      </button>
                     </td>
                   </tr>
                 ))

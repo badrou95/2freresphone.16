@@ -6,6 +6,7 @@ import {
   ImagePlus,
   Pencil,
   Plus,
+  Printer,
   Search,
   Star,
   Trash2,
@@ -13,13 +14,16 @@ import {
   X,
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
+import { printProductThermalLabels } from '../../lib/printer';
 import { CATEGORY_GROUPS, formatDzd } from '../../shared/domain';
+import { StoreSettings } from '../../types';
 import { ProductImage } from '../ProductImage';
 
 interface AdminProductsProps {
   products: any[];
   categories: any[];
   globalLowStockThreshold: number;
+  storeSettings?: Partial<StoreSettings>;
   initialOnlyMissingPhotos?: boolean;
   onRefresh: () => void;
 }
@@ -28,6 +32,7 @@ export function AdminProducts({
   products,
   categories,
   globalLowStockThreshold,
+  storeSettings = {},
   initialOnlyMissingPhotos = false,
   onRefresh,
 }: AdminProductsProps) {
@@ -332,7 +337,7 @@ export function AdminProducts({
                   <tr>
                     <th className="py-3 px-4 font-semibold">Produit</th>
                     <th className="py-3 px-4 font-semibold">Catégorie / Type</th>
-                    <th className="py-3 px-4 font-semibold text-right">Prix (DZD)</th>
+                    <th className="py-3 px-4 font-semibold text-right">Prix vente / achat</th>
                     <th className="py-3 px-4 font-semibold text-right">Stock / Seuil</th>
                     <th className="py-3 px-4 font-semibold text-right">Photos &amp; Actions</th>
                   </tr>
@@ -360,8 +365,11 @@ export function AdminProducts({
                           {p.productType === 'digital' ? 'Numérique' : 'Physique'}
                         </span>
                       </td>
-                      <td className="py-3 px-4 text-right font-mono font-semibold text-slate-900 tabular-nums">
-                        {formatDzd(p.priceDzd)}
+                      <td className="py-3 px-4 text-right font-mono tabular-nums">
+                        <span className="font-semibold text-slate-900">{formatDzd(p.priceDzd)}</span>
+                        <span className="block text-[11px] text-slate-400">
+                          Achat : {formatDzd(p.costPriceDzd || 0)}
+                        </span>
                       </td>
                       <td className="py-3 px-4 text-right font-mono text-xs tabular-nums">
                         {p.productType === 'digital' ? (
@@ -408,6 +416,28 @@ export function AdminProducts({
                           >
                             <ImagePlus className="w-3.5 h-3.5" />
                             <span className="font-mono">{p.images?.length || 0}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              printProductThermalLabels(
+                                [
+                                  {
+                                    name: p.name,
+                                    sku: p.sku,
+                                    barcode: p.barcode || p.sku,
+                                    priceDzd: p.priceDzd,
+                                    copies: 1,
+                                  },
+                                ],
+                                storeSettings,
+                              )
+                            }
+                            title="Imprimer étiquette thermique"
+                            aria-label={`Imprimer étiquette ${p.name}`}
+                            className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600"
+                          >
+                            <Printer className="w-3.5 h-3.5" />
                           </button>
                           <button
                             type="button"

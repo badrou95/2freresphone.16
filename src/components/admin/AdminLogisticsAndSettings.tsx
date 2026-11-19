@@ -5,6 +5,7 @@ import {
   Image as ImageIcon,
   Info,
   Mail,
+  Pencil,
   Plus,
   Save,
   Search,
@@ -12,6 +13,7 @@ import {
   Trash2,
   Truck,
   Upload,
+  X,
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
 import { formatDzd } from '../../shared/domain';
@@ -357,7 +359,7 @@ export function AdminCarriersAndRates({
 }
 
 // ---------------------------------------------------------------------------
-// 13. SOCIAL LINKS
+// 13. SOCIAL LINKS (ADD + EDIT + TOGGLE + DELETE)
 // ---------------------------------------------------------------------------
 export function AdminSocialLinks({
   socialLinks,
@@ -366,151 +368,315 @@ export function AdminSocialLinks({
   socialLinks: any[];
   onRefresh: () => void;
 }) {
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [platform, setPlatform] = useState('instagram');
   const [label, setLabel] = useState('');
   const [urlOrHandle, setUrlOrHandle] = useState('');
   const [pixelId, setPixelId] = useState('');
   const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
+  const formRef = React.useRef<HTMLFormElement | null>(null);
 
-  const handleAdd = async (e: React.FormEvent) => {
+  const resetForm = () => {
+    setEditingId(null);
+    setPlatform('instagram');
+    setLabel('');
+    setUrlOrHandle('');
+    setPixelId('');
+  };
+
+  const startEdit = (s: any) => {
+    setEditingId(s.id);
+    setPlatform(s.platform || 'instagram');
+    setLabel(s.label || '');
+    setUrlOrHandle(s.urlOrHandle || '');
+    setPixelId(s.pixelId || '');
+    setFeedback(null);
+    formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!label.trim() || !urlOrHandle.trim()) return;
     setSaving(true);
+    setFeedback(null);
     try {
-      await adminFetch('/api/admin/social-links', {
-        method: 'POST',
-        body: JSON.stringify({ platform, label, urlOrHandle, pixelId: pixelId || null }),
-      });
-      setLabel('');
-      setUrlOrHandle('');
-      setPixelId('');
+      if (editingId !== null) {
+        await adminFetch(`/api/admin/social-links/${editingId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            platform,
+            label: label.trim(),
+            urlOrHandle: urlOrHandle.trim(),
+            pixelId: pixelId.trim() || null,
+          }),
+        });
+        setFeedback({ type: 'ok', msg: 'Lien du réseau social modifié avec succès.' });
+      } else {
+        await adminFetch('/api/admin/social-links', {
+          method: 'POST',
+          body: JSON.stringify({
+            platform,
+            label: label.trim(),
+            urlOrHandle: urlOrHandle.trim(),
+            pixelId: pixelId.trim() || null,
+          }),
+        });
+        setFeedback({ type: 'ok', msg: 'Réseau social ajouté avec succès.' });
+      }
+      resetForm();
       onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'err', msg: err?.message || 'Erreur lors de l’enregistrement.' });
     } finally {
       setSaving(false);
     }
   };
 
   const toggleLink = async (s: any) => {
-    await adminFetch(`/api/admin/social-links/${s.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ isActive: !s.isActive }),
-    });
-    onRefresh();
+    setFeedback(null);
+    try {
+      await adminFetch(`/api/admin/social-links/${s.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isActive: !s.isActive }),
+      });
+      onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'err', msg: err?.message || 'Erreur de mise à jour.' });
+    }
   };
 
   const deleteLink = async (id: number) => {
-    await adminFetch(`/api/admin/social-links/${id}`, { method: 'DELETE' });
-    onRefresh();
+    setFeedback(null);
+    try {
+      await adminFetch(`/api/admin/social-links/${id}`, { method: 'DELETE' });
+      if (editingId === id) resetForm();
+      setFeedback({ type: 'ok', msg: 'Lien supprimé.' });
+      onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'err', msg: err?.message || 'Erreur lors de la suppression.' });
+    }
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-      <form
-        onSubmit={handleAdd}
-        className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-4 h-fit"
-      >
-        <div className="flex items-center gap-2">
-          <Globe className="w-4 h-4 text-blue-700" />
-          <h3 className="font-display font-semibold text-base text-slate-900">
-            Ajouter un réseau social
-          </h3>
-        </div>
-        <div>
-          <label className="block text-xs font-semibold text-slate-700 mb-1">Plateforme</label>
-          <select
-            value={platform}
-            onChange={(e) => setPlatform(e.target.value)}
-            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 bg-white"
-          >
-            <option value="whatsapp">WhatsApp</option>
-            <option value="instagram">Instagram</option>
-            <option value="facebook">Facebook</option>
-            <option value="tiktok">TikTok</option>
-            <option value="youtube">YouTube</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-xs font-semibold text-slate-700 mb-1">Libellé affiché *</label>
-          <input
-            required
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder="Ex. Instagram @2freresphone"
-            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-semibold text-slate-700 mb-1">URL ou lien direct *</label>
-          <input
-            required
-            value={urlOrHandle}
-            onChange={(e) => setUrlOrHandle(e.target.value)}
-            placeholder="https://instagram.com/2freresphone"
-            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-semibold text-slate-700 mb-1">Pixel ID (optionnel)</label>
-          <input
-            value={pixelId}
-            onChange={(e) => setPixelId(e.target.value)}
-            placeholder="Meta Pixel / TikTok Pixel ID"
-            className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 font-mono"
-          />
-        </div>
-        <button
-          type="submit"
-          disabled={saving}
-          className="w-full py-2.5 px-4 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold"
+    <div className="space-y-4">
+      {feedback && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs font-medium ${
+            feedback.type === 'ok'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-red-50 border-red-200 text-red-700'
+          }`}
         >
-          {saving ? 'Ajout...' : 'Enregistrer le réseau'}
-        </button>
-      </form>
+          {feedback.msg}
+        </div>
+      )}
 
-      <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <table className="w-full text-sm text-left">
-          <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
-            <tr>
-              <th className="py-3 px-4 font-semibold">Plateforme</th>
-              <th className="py-3 px-4 font-semibold">Lien / Identifiant</th>
-              <th className="py-3 px-4 font-semibold">Pixel</th>
-              <th className="py-3 px-4 font-semibold text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {socialLinks.map((s) => (
-              <tr key={s.id} className="hover:bg-slate-50">
-                <td className="py-3 px-4">
-                  <p className="font-medium text-slate-900">{s.label}</p>
-                  <p className="text-xs text-slate-400 uppercase">{s.platform}</p>
-                </td>
-                <td className="py-3 px-4 text-xs text-blue-700 break-all">{s.urlOrHandle}</td>
-                <td className="py-3 px-4 font-mono text-xs text-slate-500">{s.pixelId || '—'}</td>
-                <td className="py-3 px-4 text-right">
-                  <div className="inline-flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => toggleLink(s)}
-                      className={`px-2.5 py-1 rounded text-xs font-semibold ${
-                        s.isActive ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
-                      }`}
-                    >
-                      {s.isActive ? 'Visible' : 'Masqué'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => deleteLink(s.id)}
-                      className="p-1.5 rounded text-slate-400 hover:text-red-600 hover:bg-red-50"
-                      aria-label="Supprimer"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <form
+          ref={formRef}
+          onSubmit={handleSubmit}
+          className={`lg:col-span-4 bg-white border rounded-xl p-5 space-y-4 h-fit ${
+            editingId !== null ? 'border-blue-400 ring-2 ring-blue-100' : 'border-slate-200'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Globe className="w-4 h-4 text-blue-700" />
+              <h3 className="font-display font-semibold text-base text-slate-900">
+                {editingId !== null ? 'Modifier le réseau social' : 'Ajouter un réseau social'}
+              </h3>
+            </div>
+            {editingId !== null && (
+              <button
+                type="button"
+                onClick={resetForm}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-slate-500 hover:bg-slate-100"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Annuler</span>
+              </button>
+            )}
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Plateforme</label>
+            <select
+              value={platform}
+              onChange={(e) => setPlatform(e.target.value)}
+              className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 bg-white"
+            >
+              <option value="whatsapp">WhatsApp</option>
+              <option value="instagram">Instagram</option>
+              <option value="facebook">Facebook</option>
+              <option value="tiktok">TikTok</option>
+              <option value="snapchat">Snapchat</option>
+              <option value="telegram">Telegram</option>
+              <option value="youtube">YouTube</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Libellé affiché *</label>
+            <input
+              required
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="Ex. Instagram @2freresphone"
+              className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">URL ou lien direct *</label>
+            <input
+              required
+              value={urlOrHandle}
+              onChange={(e) => setUrlOrHandle(e.target.value)}
+              placeholder="https://instagram.com/2freresphone"
+              className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Pixel ID (optionnel)</label>
+            <input
+              value={pixelId}
+              onChange={(e) => setPixelId(e.target.value)}
+              placeholder="Meta Pixel / TikTok Pixel ID"
+              className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 font-mono"
+            />
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={saving}
+              className={`flex-1 py-2.5 px-4 rounded-lg text-white text-xs font-semibold ${
+                editingId !== null
+                  ? 'bg-blue-700 hover:bg-blue-800'
+                  : 'bg-slate-900 hover:bg-slate-800'
+              }`}
+            >
+              {saving
+                ? 'Enregistrement...'
+                : editingId !== null
+                  ? 'Enregistrer les modifications'
+                  : 'Enregistrer le réseau'}
+            </button>
+          </div>
+        </form>
+
+        <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl overflow-hidden">
+          {socialLinks.length === 0 ? (
+            <div className="p-8 text-center text-sm text-slate-500">
+              Aucun réseau social configuré pour le moment.
+            </div>
+          ) : (
+            <>
+              {/* Mobile Cards */}
+              <div className="divide-y divide-slate-100 md:hidden">
+                {socialLinks.map((s) => (
+                  <div
+                    key={s.id}
+                    className={`p-4 space-y-2.5 ${editingId === s.id ? 'bg-blue-50/50' : ''}`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="font-semibold text-sm text-slate-900">{s.label}</p>
+                        <p className="text-[11px] font-semibold text-slate-400 uppercase">{s.platform}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => toggleLink(s)}
+                        className={`px-2.5 py-1 rounded text-xs font-semibold ${
+                          s.isActive ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                        }`}
+                      >
+                        {s.isActive ? 'Visible' : 'Masqué'}
+                      </button>
+                    </div>
+                    <p className="text-xs text-blue-700 break-all">{s.urlOrHandle}</p>
+                    {s.pixelId && (
+                      <p className="text-[11px] font-mono text-slate-500">Pixel : {s.pixelId}</p>
+                    )}
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => startEdit(s)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-xs font-semibold hover:bg-blue-100"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                        <span>Modifier</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteLink(s.id)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:text-red-600 hover:bg-red-50 text-xs font-semibold"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Supprimer</span>
+                      </button>
+                    </div>
                   </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                ))}
+              </div>
+
+              {/* Desktop Table */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-sm text-left">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
+                    <tr>
+                      <th className="py-3 px-4 font-semibold">Plateforme</th>
+                      <th className="py-3 px-4 font-semibold">Lien / Identifiant</th>
+                      <th className="py-3 px-4 font-semibold">Pixel</th>
+                      <th className="py-3 px-4 font-semibold text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {socialLinks.map((s) => (
+                      <tr
+                        key={s.id}
+                        className={`hover:bg-slate-50 ${editingId === s.id ? 'bg-blue-50/50' : ''}`}
+                      >
+                        <td className="py-3 px-4">
+                          <p className="font-medium text-slate-900">{s.label}</p>
+                          <p className="text-xs text-slate-400 uppercase">{s.platform}</p>
+                        </td>
+                        <td className="py-3 px-4 text-xs text-blue-700 break-all">{s.urlOrHandle}</td>
+                        <td className="py-3 px-4 font-mono text-xs text-slate-500">{s.pixelId || '—'}</td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => startEdit(s)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold"
+                            >
+                              <Pencil className="w-3 h-3" />
+                              <span>Modifier</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => toggleLink(s)}
+                              className={`px-2.5 py-1 rounded text-xs font-semibold ${
+                                s.isActive ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                              }`}
+                            >
+                              {s.isActive ? 'Visible' : 'Masqué'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteLink(s.id)}
+                              className="p-1.5 rounded text-slate-400 hover:text-red-600 hover:bg-red-50"
+                              aria-label="Supprimer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

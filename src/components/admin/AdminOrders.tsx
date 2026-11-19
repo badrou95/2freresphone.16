@@ -1,6 +1,19 @@
 import { useMemo, useState } from 'react';
-import { Download, Eye, Kanban, List, Search, ShieldAlert, X } from 'lucide-react';
+import {
+  CheckCircle2,
+  Download,
+  Eye,
+  Kanban,
+  List,
+  Printer,
+  Receipt,
+  Search,
+  ShieldAlert,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { adminFetch } from '../../lib/api';
+import { printDeliverySlip, printPurchaseReceipt } from '../../lib/printer';
 import {
   formatDzd,
   ORDER_STATUSES,
@@ -8,21 +21,26 @@ import {
   OrderStatus,
   toCsv,
 } from '../../shared/domain';
+import { StoreSettings } from '../../types';
 
 interface AdminOrdersProps {
   orders: any[];
   carriers: any[];
+  storeSettings?: Partial<StoreSettings>;
   onRefresh: () => void;
 }
 
-export function AdminOrders({ orders, carriers, onRefresh }: AdminOrdersProps) {
+export function AdminOrders({ orders, carriers, storeSettings = {}, onRefresh }: AdminOrdersProps) {
   const [viewMode, setViewMode] = useState<'table' | 'kanban'>('table');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [page, setPage] = useState(1);
   const [selectedOrder, setSelectedOrder] = useState<any | null>(null);
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
   // Modal edit fields
   const [editStatus, setEditStatus] = useState<OrderStatus>('nouvelle');
@@ -92,6 +110,38 @@ export function AdminOrders({ orders, carriers, onRefresh }: AdminOrdersProps) {
     }
   };
 
+  const handleDeleteOrder = async (order: any) => {
+    if (confirmDeleteId !== order.id) {
+      setConfirmDeleteId(order.id);
+      return;
+    }
+    setDeletingId(order.id);
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      const res = await adminFetch<{
+        deleted: boolean;
+        reference: string;
+        stockWasDeducted: boolean;
+        restoredUnits: number;
+      }>(`/api/admin/orders/${order.id}`, {
+        method: 'DELETE',
+      });
+      setConfirmDeleteId(null);
+      if (selectedOrder?.id === order.id) setSelectedOrder(null);
+      setActionSuccess(
+        res.restoredUnits > 0
+          ? `Commande ${res.reference} supprimée — ${res.restoredUnits} article(s) remis automatiquement en stock.`
+          : `Commande ${res.reference} supprimée avec succès.`,
+      );
+      onRefresh();
+    } catch (err: any) {
+      setActionError(err?.message || 'Erreur lors de la suppression de la commande.');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const handleExportCsv = () => {
     const csv = toCsv(
       ['Référence', 'Date', 'Client', 'Téléphone', 'Wilaya', 'Commune', 'Livraison', 'Statut', 'Total DZD'],
@@ -122,6 +172,17 @@ export function AdminOrders({ orders, carriers, onRefresh }: AdminOrdersProps) {
         <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center justify-between">
           <span>{actionError}</span>
           <button type="button" onClick={() => setActionError(null)} className="font-semibold underline">
+            Fermer
+          </button>
+        </div>
+      )}
+      {actionSuccess && (
+        <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 font-medium">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            {actionSuccess}
+          </span>
+          <button type="button" onClick={() => setActionSuccess(null)} className="font-semibold underline">
             Fermer
           </button>
         </div>
@@ -269,14 +330,49 @@ export function AdminOrders({ orders, carriers, onRefresh }: AdminOrdersProps) {
                           {formatDzd(o.totalDzd)}
                         </td>
                         <td className="py-3 px-4 text-right">
-                          <button
-                            type="button"
-                            onClick={() => openOrderModal(o)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-xs font-medium text-slate-700"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                            <span>Détails</span>
-                          </button>
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => printDeliverySlip(o, storeSettings)}
+                              title="Imprimer le bon de livraison"
+                              className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => printPurchaseReceipt(o, storeSettings)}
+                              title="Imprimer le bon d’achat / reçu"
+                              className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600"
+                            >
+                              <Receipt className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openOrderModal(o)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-xs font-medium text-slate-700"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>Détails</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={deletingId === o.id}
+                              onClick={() => handleDeleteOrder(o)}
+                              title="Supprimer la commande (retour auto en stock)"
+                              className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border text-xs font-semibold ${
+                                confirmDeleteId === o.id
+                                  ? 'bg-red-600 text-white border-red-600'
+                                  : 'border-slate-200 text-slate-500 hover:text-red-600 hover:bg-red-50'
+                              }`}
+                            >
+                              {confirmDeleteId === o.id ? (
+                                <span>{deletingId === o.id ? '...' : 'Confirmer ?'}</span>
+                              ) : (
+                                <Trash2 className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -480,22 +576,66 @@ export function AdminOrders({ orders, carriers, onRefresh }: AdminOrdersProps) {
                 />
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setSelectedOrder(null)}
-                  className="px-4 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700"
-                >
-                  Fermer
-                </button>
-                <button
-                  type="button"
-                  disabled={saving}
-                  onClick={handleSaveOrder}
-                  className="px-5 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-sm font-semibold"
-                >
-                  {saving ? 'Enregistrement...' : 'Enregistrer les modifications'}
-                </button>
+              {/* Print & Delete Actions Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => printDeliverySlip(selectedOrder, storeSettings)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>Bon de livraison</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => printPurchaseReceipt(selectedOrder, storeSettings)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold"
+                  >
+                    <Receipt className="w-3.5 h-3.5" />
+                    <span>Bon d’achat</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={deletingId === selectedOrder.id}
+                    onClick={() => handleDeleteOrder(selectedOrder)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold ${
+                      confirmDeleteId === selectedOrder.id
+                        ? 'bg-red-600 text-white border-red-600'
+                        : 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100'
+                    }`}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>
+                      {confirmDeleteId === selectedOrder.id
+                        ? deletingId === selectedOrder.id
+                          ? 'Suppression...'
+                          : 'Confirmer suppression (retour stock)'
+                        : 'Supprimer'}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmDeleteId(null);
+                      setSelectedOrder(null);
+                    }}
+                    className="px-4 py-2 rounded-lg border border-slate-300 text-xs font-medium text-slate-700"
+                  >
+                    Fermer
+                  </button>
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={handleSaveOrder}
+                    className="px-4 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold"
+                  >
+                    {saving ? 'Enregistrement...' : 'Enregistrer'}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
