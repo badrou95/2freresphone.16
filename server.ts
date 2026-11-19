@@ -1389,6 +1389,37 @@ export function createApp() {
     }
   });
 
+  // Bulk delete multiple categories at once (products stay intact with categoryId = null)
+  app.post('/api/admin/categories/bulk-delete', requireAdmin, async (req, res) => {
+    try {
+      const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [];
+      const uniqueIds = Array.from(
+        new Set(
+          rawIds
+            .map((v: unknown) => Number(v))
+            .filter((n: number) => Number.isInteger(n) && n > 0),
+        ),
+      ) as number[];
+
+      if (uniqueIds.length === 0) {
+        return res.status(400).json({ error: 'Aucune catégorie sélectionnée à supprimer.' });
+      }
+
+      const deletedRows = await db
+        .delete(categories)
+        .where(inArray(categories.id, uniqueIds))
+        .returning({ id: categories.id });
+
+      return res.json({
+        deletedCount: deletedRows.length,
+        deletedIds: deletedRows.map((r) => r.id),
+      });
+    } catch (error) {
+      console.error('Bulk delete categories error:', error);
+      return res.status(500).json({ error: 'Erreur lors de la suppression multiple des catégories.' });
+    }
+  });
+
   // 5. Products CRUD + Direct Photo Upload + Low Stock Threshold
   app.get('/api/admin/products', requireAdmin, async (_req, res) => {
     try {
@@ -1567,6 +1598,37 @@ export function createApp() {
       return res.json({ deleted: true });
     } catch (error) {
       return res.status(500).json({ error: 'Erreur suppression produit.' });
+    }
+  });
+
+  // Bulk delete multiple products at once
+  app.post('/api/admin/products/bulk-delete', requireAdmin, async (req, res) => {
+    try {
+      const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [];
+      const uniqueIds = Array.from(
+        new Set(
+          rawIds
+            .map((v: unknown) => Number(v))
+            .filter((n: number) => Number.isInteger(n) && n > 0),
+        ),
+      ) as number[];
+
+      if (uniqueIds.length === 0) {
+        return res.status(400).json({ error: 'Aucun produit sélectionné à supprimer.' });
+      }
+
+      const deletedRows = await db
+        .delete(products)
+        .where(inArray(products.id, uniqueIds))
+        .returning({ id: products.id });
+
+      return res.json({
+        deletedCount: deletedRows.length,
+        deletedIds: deletedRows.map((r) => r.id),
+      });
+    } catch (error) {
+      console.error('Bulk delete products error:', error);
+      return res.status(500).json({ error: 'Erreur lors de la suppression multiple des produits.' });
     }
   });
 
