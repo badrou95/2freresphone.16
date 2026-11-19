@@ -4,7 +4,7 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
-import { db } from './src/db/index.ts';
+import { db, hasDatabaseConfig } from './src/db/index.ts';
 import {
   carriers,
   categories,
@@ -65,6 +65,12 @@ export function createApp() {
 
   // Lazy seed middleware on API routes (never top-level startup probe!)
   app.use('/api', async (_req, res, next) => {
+    if (!hasDatabaseConfig()) {
+      return res.status(503).json({
+        error:
+          'Base de données PostgreSQL non connectée sur Vercel : ouvrez Vercel → Storage → Create Database → Neon Postgres, puis cliquez sur Redeploy.',
+      });
+    }
     try {
       await ensureDatabaseSeeded();
       next();

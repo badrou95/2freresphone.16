@@ -47,12 +47,324 @@ const INITIAL_CATEGORIES = [
   { name: 'Services numériques', slug: 'services-numeriques', categoryGroup: 'digital', sortOrder: 19 },
 ];
 
+const DDL_STATEMENTS: string[] = [
+  `CREATE TABLE IF NOT EXISTS admin_users (
+    id serial PRIMARY KEY,
+    uid text UNIQUE,
+    email text NOT NULL UNIQUE,
+    full_name text NOT NULL DEFAULT 'Administrateur 2Frères Phone',
+    role text NOT NULL DEFAULT 'super_admin',
+    is_active boolean NOT NULL DEFAULT true,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS media_assets (
+    id serial PRIMARY KEY,
+    filename text NOT NULL,
+    mime_type text NOT NULL,
+    data_base64 text NOT NULL,
+    size_bytes integer NOT NULL DEFAULT 0,
+    kind text NOT NULL DEFAULT 'product',
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS store_settings (
+    id serial PRIMARY KEY,
+    store_name text NOT NULL DEFAULT '2Frères Phone',
+    tagline text NOT NULL DEFAULT 'Accessoires téléphoniques, Gaming & Services numériques en Algérie',
+    logo_url text,
+    whatsapp_phone text NOT NULL DEFAULT '+213550000000',
+    support_email text NOT NULL DEFAULT 'contact@2freresphone.dz',
+    admin_alert_email text NOT NULL DEFAULT 'badroumc@gmail.com',
+    default_low_stock_threshold integer NOT NULL DEFAULT 10,
+    currency text NOT NULL DEFAULT 'DZD',
+    store_address text NOT NULL DEFAULT 'Algérie',
+    cod_enabled boolean NOT NULL DEFAULT true,
+    digital_order_note text NOT NULL DEFAULT 'Livraison et activation numérique après validation de la commande et du paiement.',
+    updated_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS categories (
+    id serial PRIMARY KEY,
+    parent_id integer,
+    name text NOT NULL,
+    slug text NOT NULL UNIQUE,
+    category_group text NOT NULL DEFAULT 'accessories',
+    description text,
+    sort_order integer NOT NULL DEFAULT 0,
+    is_active boolean NOT NULL DEFAULT true,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS products (
+    id serial PRIMARY KEY,
+    category_id integer REFERENCES categories(id) ON DELETE SET NULL,
+    sku text NOT NULL UNIQUE,
+    barcode text,
+    external_ref text,
+    name text NOT NULL,
+    slug text NOT NULL UNIQUE,
+    brand text,
+    short_description text,
+    description text NOT NULL DEFAULT '',
+    product_type text NOT NULL DEFAULT 'physical',
+    price_dzd integer NOT NULL DEFAULT 0,
+    compare_at_price_dzd integer,
+    cost_price_dzd integer NOT NULL DEFAULT 0,
+    stock_quantity integer NOT NULL DEFAULT 0,
+    low_stock_threshold integer,
+    is_featured boolean NOT NULL DEFAULT false,
+    is_active boolean NOT NULL DEFAULT true,
+    digital_availability text DEFAULT 'available',
+    digital_activation_template text,
+    created_at timestamp NOT NULL DEFAULT now(),
+    updated_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS product_images (
+    id serial PRIMARY KEY,
+    product_id integer NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    url text NOT NULL,
+    alt_text text NOT NULL DEFAULT '',
+    sort_order integer NOT NULL DEFAULT 0,
+    is_primary boolean NOT NULL DEFAULT false,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS carriers (
+    id serial PRIMARY KEY,
+    name text NOT NULL,
+    code text NOT NULL UNIQUE,
+    supports_home boolean NOT NULL DEFAULT true,
+    supports_stop_desk boolean NOT NULL DEFAULT true,
+    api_provider text NOT NULL DEFAULT 'manual',
+    api_endpoint text,
+    api_configured boolean NOT NULL DEFAULT false,
+    notes text,
+    is_active boolean NOT NULL DEFAULT true,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS shipping_rates (
+    id serial PRIMARY KEY,
+    carrier_id integer NOT NULL REFERENCES carriers(id) ON DELETE CASCADE,
+    wilaya_code text NOT NULL,
+    wilaya_name text NOT NULL,
+    home_price_dzd integer NOT NULL DEFAULT 0,
+    stop_desk_price_dzd integer NOT NULL DEFAULT 0,
+    estimated_days text NOT NULL DEFAULT '24-48h',
+    is_active boolean NOT NULL DEFAULT true,
+    updated_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS customers (
+    id serial PRIMARY KEY,
+    first_name text NOT NULL,
+    last_name text NOT NULL,
+    phone text NOT NULL UNIQUE,
+    wilaya_code text NOT NULL DEFAULT '16',
+    wilaya_name text NOT NULL DEFAULT 'Alger',
+    commune text NOT NULL DEFAULT '',
+    address text NOT NULL DEFAULT '',
+    is_blocked boolean NOT NULL DEFAULT false,
+    notes text NOT NULL DEFAULT '',
+    created_at timestamp NOT NULL DEFAULT now(),
+    updated_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS orders (
+    id serial PRIMARY KEY,
+    reference text NOT NULL UNIQUE,
+    customer_id integer REFERENCES customers(id) ON DELETE SET NULL,
+    first_name text NOT NULL,
+    last_name text NOT NULL,
+    phone text NOT NULL,
+    wilaya_code text NOT NULL,
+    wilaya_name text NOT NULL,
+    commune text NOT NULL,
+    address text NOT NULL,
+    delivery_type text NOT NULL DEFAULT 'home',
+    carrier_id integer REFERENCES carriers(id) ON DELETE SET NULL,
+    carrier_name text,
+    tracking_number text,
+    status text NOT NULL DEFAULT 'nouvelle',
+    payment_method text NOT NULL DEFAULT 'cod',
+    payment_status text NOT NULL DEFAULT 'pending',
+    promo_code text,
+    subtotal_dzd integer NOT NULL DEFAULT 0,
+    discount_dzd integer NOT NULL DEFAULT 0,
+    shipping_fee_dzd integer NOT NULL DEFAULT 0,
+    total_dzd integer NOT NULL DEFAULT 0,
+    has_digital_items boolean NOT NULL DEFAULT false,
+    has_physical_items boolean NOT NULL DEFAULT true,
+    stock_deducted boolean NOT NULL DEFAULT false,
+    source text NOT NULL DEFAULT 'web',
+    customer_notes text,
+    admin_notes text,
+    created_at timestamp NOT NULL DEFAULT now(),
+    updated_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS order_items (
+    id serial PRIMARY KEY,
+    order_id integer NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    product_id integer REFERENCES products(id) ON DELETE SET NULL,
+    product_name text NOT NULL,
+    product_sku text NOT NULL DEFAULT '',
+    product_type text NOT NULL DEFAULT 'physical',
+    unit_price_dzd integer NOT NULL,
+    cost_price_dzd integer NOT NULL DEFAULT 0,
+    quantity integer NOT NULL DEFAULT 1,
+    line_total_dzd integer NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS order_status_history (
+    id serial PRIMARY KEY,
+    order_id integer NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    from_status text,
+    to_status text NOT NULL,
+    note text,
+    changed_by text NOT NULL DEFAULT 'system',
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS sales (
+    id serial PRIMARY KEY,
+    order_id integer NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+    order_reference text NOT NULL,
+    customer_name text NOT NULL,
+    wilaya_name text NOT NULL,
+    items_revenue_dzd integer NOT NULL DEFAULT 0,
+    discount_dzd integer NOT NULL DEFAULT 0,
+    shipping_fee_dzd integer NOT NULL DEFAULT 0,
+    cost_of_goods_dzd integer NOT NULL DEFAULT 0,
+    total_collected_dzd integer NOT NULL DEFAULT 0,
+    estimated_margin_dzd integer NOT NULL DEFAULT 0,
+    recorded_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS stock_imports (
+    id serial PRIMARY KEY,
+    file_name text NOT NULL,
+    file_format text NOT NULL,
+    source_table_or_sheet text,
+    sync_mode text NOT NULL DEFAULT 'add_only',
+    total_rows integer NOT NULL DEFAULT 0,
+    added_count integer NOT NULL DEFAULT 0,
+    updated_count integer NOT NULL DEFAULT 0,
+    skipped_count integer NOT NULL DEFAULT 0,
+    error_count integer NOT NULL DEFAULT 0,
+    summary_json text,
+    imported_by text NOT NULL DEFAULT 'admin',
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS import_mapping_profiles (
+    id serial PRIMARY KEY,
+    profile_name text NOT NULL UNIQUE,
+    source_format text NOT NULL,
+    table_or_sheet_name text,
+    column_mapping_json text NOT NULL,
+    default_sync_mode text NOT NULL DEFAULT 'add_only',
+    updated_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS stock_movements (
+    id serial PRIMARY KEY,
+    product_id integer NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    order_id integer REFERENCES orders(id) ON DELETE SET NULL,
+    import_id integer REFERENCES stock_imports(id) ON DELETE SET NULL,
+    delta integer NOT NULL,
+    previous_qty integer NOT NULL,
+    new_qty integer NOT NULL,
+    reason text NOT NULL,
+    created_by text NOT NULL DEFAULT 'system',
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS stock_alerts (
+    id serial PRIMARY KEY,
+    product_id integer NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    product_name text NOT NULL,
+    product_sku text NOT NULL,
+    current_stock integer NOT NULL,
+    threshold_used integer NOT NULL,
+    status text NOT NULL DEFAULT 'active',
+    email_status text NOT NULL DEFAULT 'pending',
+    email_recipient text,
+    email_error text,
+    notified_at timestamp NOT NULL DEFAULT now(),
+    resolved_at timestamp
+  )`,
+  `CREATE TABLE IF NOT EXISTS product_reviews (
+    id serial PRIMARY KEY,
+    product_id integer NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    order_id integer REFERENCES orders(id) ON DELETE SET NULL,
+    order_reference text NOT NULL,
+    customer_name text NOT NULL,
+    customer_phone text NOT NULL,
+    rating integer NOT NULL,
+    title text NOT NULL DEFAULT '',
+    comment text NOT NULL,
+    is_verified_purchase boolean NOT NULL DEFAULT true,
+    status text NOT NULL DEFAULT 'pending',
+    admin_reply text,
+    moderated_at timestamp,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS returns (
+    id serial PRIMARY KEY,
+    order_id integer NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    order_reference text NOT NULL,
+    customer_name text NOT NULL,
+    phone text NOT NULL,
+    wilaya_name text NOT NULL,
+    reason text NOT NULL DEFAULT 'Client injoignable',
+    condition text NOT NULL DEFAULT 'intact',
+    restocked boolean NOT NULL DEFAULT false,
+    return_fee_dzd integer NOT NULL DEFAULT 0,
+    status text NOT NULL DEFAULT 'en_cours',
+    notes text,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS promotions (
+    id serial PRIMARY KEY,
+    code text NOT NULL UNIQUE,
+    description text NOT NULL DEFAULT '',
+    discount_type text NOT NULL DEFAULT 'percent',
+    discount_value integer NOT NULL DEFAULT 0,
+    min_order_dzd integer NOT NULL DEFAULT 0,
+    max_uses integer,
+    used_count integer NOT NULL DEFAULT 0,
+    starts_at timestamp,
+    ends_at timestamp,
+    is_active boolean NOT NULL DEFAULT true,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS digital_deliveries (
+    id serial PRIMARY KEY,
+    order_id integer NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    order_item_id integer NOT NULL REFERENCES order_items(id) ON DELETE CASCADE,
+    product_id integer REFERENCES products(id) ON DELETE SET NULL,
+    product_name text NOT NULL,
+    delivery_status text NOT NULL DEFAULT 'pending',
+    activation_instructions text NOT NULL DEFAULT '',
+    private_fulfillment_note text NOT NULL DEFAULT '',
+    delivered_by text,
+    delivered_at timestamp,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS social_links (
+    id serial PRIMARY KEY,
+    platform text NOT NULL,
+    label text NOT NULL,
+    url_or_handle text NOT NULL,
+    pixel_id text,
+    is_active boolean NOT NULL DEFAULT true,
+    sort_order integer NOT NULL DEFAULT 0
+  )`,
+];
+
+async function ensureTablesExist(): Promise<void> {
+  const check = await db.execute(sql`SELECT to_regclass('public.store_settings') AS tbl`);
+  const existing = (check.rows?.[0] as { tbl?: string | null } | undefined)?.tbl;
+  if (existing) return;
+  for (const stmt of DDL_STATEMENTS) {
+    await db.execute(sql.raw(stmt));
+  }
+}
+
 export async function ensureDatabaseSeeded(): Promise<void> {
   if (seeded) return;
   if (seedPromise) return seedPromise;
 
   seedPromise = (async () => {
     try {
+      await ensureTablesExist();
       // 1. Store settings singleton
       const existingSettings = await db.select().from(storeSettings).limit(1);
       if (existingSettings.length === 0) {
