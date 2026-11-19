@@ -20,48 +20,61 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      setUser(fbUser);
-      setAuthError(null);
-      if (!fbUser) {
+  const verifyAdminUser = React.useCallback(async (fbUser: User | null) => {
+    setUser(fbUser);
+    setAuthError(null);
+    if (!fbUser) {
+      setAdmin(null);
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 12000);
+    try {
+      const token = await fbUser.getIdToken();
+      const res = await fetch('/api/admin/me', {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
         setAdmin(null);
-        setLoading(false);
-        return;
-      }
-      try {
-        const token = await fbUser.getIdToken();
-        const res = await fetch('/api/admin/me', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          setAdmin(null);
-          if (data.error) {
-            setAuthError(data.error);
-          } else if (res.status >= 500) {
-            setAuthError(`Erreur serveur (${res.status}) lors de la vérification du compte administrateur.`);
-          } else {
-            setAuthError('Accès administrateur refusé.');
-          }
+        if (data.error) {
+          setAuthError(data.error);
+        } else if (res.status >= 500) {
+          setAuthError(`Erreur serveur (${res.status}) lors de la vérification du compte administrateur.`);
         } else {
-          setAdmin(data.admin);
+          setAuthError('Accès administrateur refusé.');
         }
-      } catch (err: any) {
-        setAdmin(null);
-        setAuthError(err?.message || 'Erreur lors de la vérification du compte administrateur.');
-      } finally {
-        setLoading(false);
+      } else {
+        setAdmin(data.admin);
       }
+    } catch (err: any) {
+      setAdmin(null);
+      if (err?.name === 'AbortError') {
+        setAuthError('Délai dépassé lors de la vérification serveur. Vérifiez votre connexion ou réessayez.');
+      } else {
+        setAuthError(err?.message || 'Erreur lors de la vérification du compte administrateur.');
+      }
+    } finally {
+      window.clearTimeout(timer);
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (fbUser) => {
+      void verifyAdminUser(fbUser);
     });
     return () => unsub();
-  }, []);
+  }, [verifyAdminUser]);
 
   const signInWithGoogle = async () => {
     setAuthError(null);
     setLoading(true);
     try {
-      await signInWithPopup(auth, googleAuthProvider);
+      const cred = await signInWithPopup(auth, googleAuthProvider);
+      await verifyAdminUser(cred.user);
     } catch (err: any) {
       setLoading(false);
       if (err?.code === 'auth/popup-closed-by-user') {

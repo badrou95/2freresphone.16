@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db, hasDatabaseConfig } from './src/db/index.ts';
 import {
+  adminUsers,
   carriers,
   categories,
   customers,
@@ -2523,6 +2524,102 @@ export function createApp() {
     } catch (error) {
       console.error('Update settings error:', error);
       return res.status(500).json({ error: 'Erreur enregistrement paramètres.' });
+    }
+  });
+
+  // 15. Authorized Admin Accounts Management (multi-admin Google Auth access)
+  app.get('/api/admin/admins', requireAdmin, async (_req, res) => {
+    try {
+      const admins = await db.select().from(adminUsers).orderBy(asc(adminUsers.id));
+      return res.json({ admins });
+    } catch (error) {
+      console.error('List admins error:', error);
+      return res.status(500).json({ error: 'Erreur chargement des administrateurs.' });
+    }
+  });
+
+  app.post('/api/admin/admins', requireAdmin, async (req, res) => {
+    try {
+      const b = req.body || {};
+      const email = String(b.email || '').trim().toLowerCase();
+      const fullName = String(b.fullName || '').trim() || 'Co-gérant 2Frères Phone';
+      const role = b.role === 'super_admin' ? 'super_admin' : 'admin';
+
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error: 'Veuillez saisir une adresse e-mail Google valide.' });
+      }
+
+      const [existing] = await db.select().from(adminUsers).where(eq(adminUsers.email, email));
+      if (existing) {
+        const [updated] = await db
+          .update(adminUsers)
+          .set({ fullName, role, isActive: true })
+          .where(eq(adminUsers.id, existing.id))
+          .returning();
+        return res.json({ admin: updated });
+      }
+
+      const [created] = await db
+        .insert(adminUsers)
+        .values({
+          email,
+          fullName,
+          role,
+          isActive: true,
+        })
+        .returning();
+
+      return res.status(201).json({ admin: created });
+    } catch (error) {
+      console.error('Create admin error:', error);
+      return res.status(500).json({ error: 'Erreur lors de l’ajout de l’administrateur.' });
+    }
+  });
+
+  app.patch('/api/admin/admins/:id', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id)) return res.status(400).json({ error: 'ID invalide.' });
+      const b = req.body || {};
+
+      const [target] = await db.select().from(adminUsers).where(eq(adminUsers.id, id));
+      if (!target) return res.status(404).json({ error: 'Administrateur introuvable.' });
+
+      if (req.adminUser?.id === id && b.isActive === false) {
+        return res.status(400).json({ error: 'Vous ne pouvez pas désactiver votre propre compte administrateur.' });
+      }
+
+      const [updated] = await db
+        .update(adminUsers)
+        .set({
+          fullName: b.fullName !== undefined ? String(b.fullName).trim() : target.fullName,
+          role: b.role === 'super_admin' || b.role === 'admin' ? b.role : target.role,
+          isActive: b.isActive !== undefined ? Boolean(b.isActive) : target.isActive,
+        })
+        .where(eq(adminUsers.id, id))
+        .returning();
+
+      return res.json({ admin: updated });
+    } catch (error) {
+      console.error('Update admin error:', error);
+      return res.status(500).json({ error: 'Erreur mise à jour administrateur.' });
+    }
+  });
+
+  app.delete('/api/admin/admins/:id', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id)) return res.status(400).json({ error: 'ID invalide.' });
+
+      if (req.adminUser?.id === id) {
+        return res.status(400).json({ error: 'Vous ne pouvez pas supprimer votre propre compte administrateur.' });
+      }
+
+      await db.delete(adminUsers).where(eq(adminUsers.id, id));
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error('Delete admin error:', error);
+      return res.status(500).json({ error: 'Erreur suppression administrateur.' });
     }
   });
 

@@ -215,8 +215,9 @@ export function AdminShell({
             <div className="flex items-start gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
               <ShieldCheck className="w-4 h-4 text-blue-700 shrink-0 mt-0.5" />
               <p>
-                Connectez-vous avec votre compte Google administrateur autorisé (compte initial :{' '}
-                <span className="font-mono font-semibold text-slate-900">badroumc@gmail.com</span>).
+                Connectez-vous avec votre compte Google administrateur autorisé (comptes gérants :{' '}
+                <span className="font-mono font-semibold text-slate-900">badroumc@gmail.com</span> ·{' '}
+                <span className="font-mono font-semibold text-slate-900">tigrine156@gmail.com</span>).
               </p>
             </div>
 

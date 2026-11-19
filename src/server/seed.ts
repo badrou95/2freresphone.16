@@ -383,17 +383,24 @@ export async function ensureDatabaseSeeded(): Promise<void> {
         });
       }
 
-      // 2. Initial admin account
+      // 2. Initial admin accounts (co-owners)
       const initialAdminEmail = (process.env.INITIAL_ADMIN_EMAIL || 'badroumc@gmail.com').toLowerCase();
-      await db
-        .insert(adminUsers)
-        .values({
-          email: initialAdminEmail,
-          fullName: 'Administrateur 2Frères Phone',
-          role: 'super_admin',
-          isActive: true,
-        })
-        .onConflictDoNothing({ target: adminUsers.email });
+      const defaultAdmins = [
+        { email: initialAdminEmail, fullName: 'Administrateur 2Frères Phone' },
+        { email: 'badroumc@gmail.com', fullName: 'Administrateur 2Frères Phone' },
+        { email: 'tigrine156@gmail.com', fullName: 'Co-gérant 2Frères Phone' },
+      ];
+      for (const adm of defaultAdmins) {
+        await db
+          .insert(adminUsers)
+          .values({
+            email: adm.email,
+            fullName: adm.fullName,
+            role: 'super_admin',
+            isActive: true,
+          })
+          .onConflictDoNothing({ target: adminUsers.email });
+      }
 
       // 3. Categories
       const catCountRes = await db.select({ count: sql<number>`count(*)::int` }).from(categories);

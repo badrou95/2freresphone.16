@@ -10,9 +10,15 @@ export interface AuthRequest extends Request {
   adminUser?: typeof adminUsers.$inferSelect;
 }
 
-const INITIAL_ADMIN_EMAIL = (
-  process.env.INITIAL_ADMIN_EMAIL || 'badroumc@gmail.com'
-).toLowerCase();
+const INITIAL_ADMIN_EMAILS = Array.from(
+  new Set(
+    [
+      (process.env.INITIAL_ADMIN_EMAIL || 'badroumc@gmail.com').toLowerCase(),
+      'badroumc@gmail.com',
+      'tigrine156@gmail.com',
+    ].filter(Boolean),
+  ),
+);
 
 export async function getOrCreateAdminRecord(decoded: DecodedIdToken) {
   const email = (decoded.email || '').toLowerCase();
@@ -40,8 +46,8 @@ export async function getOrCreateAdminRecord(decoded: DecodedIdToken) {
     return rec;
   }
 
-  // Auto-provision the initial admin email configured for the store owner
-  if (email === INITIAL_ADMIN_EMAIL) {
+  // Auto-provision the initial admin emails configured for the store co-owners
+  if (INITIAL_ADMIN_EMAILS.includes(email)) {
     const [created] = await db
       .insert(adminUsers)
       .values({

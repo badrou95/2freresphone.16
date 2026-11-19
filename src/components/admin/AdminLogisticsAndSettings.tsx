@@ -8,6 +8,7 @@ import {
   Plus,
   Save,
   Search,
+  ShieldCheck,
   Trash2,
   Truck,
   Upload,
@@ -531,10 +532,76 @@ export function AdminSettings({
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
+  const [adminsList, setAdminsList] = useState<any[]>([]);
+  const [newAdminEmail, setNewAdminEmail] = useState('');
+  const [newAdminName, setNewAdminName] = useState('');
+  const [savingAdmin, setSavingAdmin] = useState(false);
+
+  const loadAdmins = React.useCallback(async () => {
+    try {
+      const res = await adminFetch<{ admins: any[] }>('/api/admin/admins');
+      setAdminsList(res.admins || []);
+    } catch {
+      // ignore initial load error if unauthenticated
+    }
+  }, []);
 
   React.useEffect(() => {
     if (settings) setForm(settings);
   }, [settings]);
+
+  React.useEffect(() => {
+    loadAdmins();
+  }, [loadAdmins]);
+
+  const handleAddAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newAdminEmail.trim()) return;
+    setSavingAdmin(true);
+    setFeedback(null);
+    try {
+      await adminFetch('/api/admin/admins', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: newAdminEmail.trim().toLowerCase(),
+          fullName: newAdminName.trim() || 'Co-gérant 2Frères Phone',
+          role: 'super_admin',
+        }),
+      });
+      setNewAdminEmail('');
+      setNewAdminName('');
+      setFeedback({ type: 'ok', msg: 'Nouveau compte administrateur Google ajouté et autorisé immédiatement.' });
+      await loadAdmins();
+    } catch (err: any) {
+      setFeedback({ type: 'err', msg: err.message || 'Erreur lors de l’ajout du compte administrateur.' });
+    } finally {
+      setSavingAdmin(false);
+    }
+  };
+
+  const handleToggleAdmin = async (adm: any) => {
+    setFeedback(null);
+    try {
+      await adminFetch(`/api/admin/admins/${adm.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isActive: !adm.isActive }),
+      });
+      await loadAdmins();
+    } catch (err: any) {
+      setFeedback({ type: 'err', msg: err.message });
+    }
+  };
+
+  const handleDeleteAdmin = async (adm: any) => {
+    setFeedback(null);
+    try {
+      await adminFetch(`/api/admin/admins/${adm.id}`, { method: 'DELETE' });
+      setFeedback({ type: 'ok', msg: `Accès supprimé pour ${adm.email}.` });
+      await loadAdmins();
+    } catch (err: any) {
+      setFeedback({ type: 'err', msg: err.message });
+    }
+  };
 
   const handleUploadLogo = async (file: File | undefined) => {
     if (!file) return;
@@ -814,6 +881,97 @@ export function AdminSettings({
           </button>
         </div>
       </form>
+
+      {/* Authorized Admin Accounts Card */}
+      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-blue-700" />
+              <span>Comptes administrateurs autorisés</span>
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              Ajoutez une deuxième adresse Gmail (ex. celle de votre frère) pour lui donner un accès complet au
+              back-office via la connexion Google.
+            </p>
+          </div>
+        </div>
+
+        <form onSubmit={handleAddAdmin} className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+          <input
+            type="email"
+            required
+            value={newAdminEmail}
+            onChange={(e) => setNewAdminEmail(e.target.value)}
+            placeholder="adresse.frere@gmail.com"
+            className="sm:col-span-5 px-3 py-2 text-sm rounded-lg border border-slate-300"
+          />
+          <input
+            type="text"
+            value={newAdminName}
+            onChange={(e) => setNewAdminName(e.target.value)}
+            placeholder="Nom (ex. Co-gérant)"
+            className="sm:col-span-4 px-3 py-2 text-sm rounded-lg border border-slate-300"
+          />
+          <button
+            type="submit"
+            disabled={savingAdmin}
+            className="sm:col-span-3 inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>{savingAdmin ? 'Ajout...' : 'Autoriser'}</span>
+          </button>
+        </form>
+
+        <div className="border border-slate-200 rounded-xl overflow-hidden">
+          <table className="w-full text-sm text-left">
+            <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
+              <tr>
+                <th className="py-2.5 px-4 font-semibold">Compte Google</th>
+                <th className="py-2.5 px-4 font-semibold">Nom</th>
+                <th className="py-2.5 px-4 font-semibold">Statut</th>
+                <th className="py-2.5 px-4 font-semibold text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {adminsList.map((adm) => (
+                <tr key={adm.id} className="hover:bg-slate-50">
+                  <td className="py-2.5 px-4 font-mono text-xs text-slate-900">{adm.email}</td>
+                  <td className="py-2.5 px-4 text-xs text-slate-600">{adm.fullName}</td>
+                  <td className="py-2.5 px-4">
+                    <span
+                      className={`inline-flex px-2 py-0.5 rounded text-[11px] font-semibold ${
+                        adm.isActive ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                      }`}
+                    >
+                      {adm.isActive ? 'Actif' : 'Désactivé'}
+                    </span>
+                  </td>
+                  <td className="py-2.5 px-4 text-right">
+                    <div className="inline-flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleToggleAdmin(adm)}
+                        className="px-2 py-1 rounded border border-slate-200 hover:bg-slate-100 text-[11px] font-medium text-slate-700"
+                      >
+                        {adm.isActive ? 'Désactiver' : 'Réactiver'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteAdmin(adm)}
+                        className="p-1.5 rounded text-slate-400 hover:text-red-600 hover:bg-red-50"
+                        aria-label="Supprimer cet administrateur"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
