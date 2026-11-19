@@ -1,4 +1,4 @@
-import nodemailer from 'nodemailer';
+// nodemailer is lazy-loaded only when SMTP credentials are configured.
 
 export interface LowStockEmailPayload {
   recipientEmail: string;
@@ -72,6 +72,7 @@ export async function sendLowStockAlertEmail(
   // Option 2: SMTP via nodemailer if configured
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
     try {
+      const { default: nodemailer } = await import('nodemailer');
       const transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST,
         port: Number(process.env.SMTP_PORT || 587),

@@ -1,6 +1,4 @@
-import * as XLSX from 'xlsx';
-import { XMLParser } from 'fast-xml-parser';
-import initSqlJs from 'sql.js';
+// Heavy parsers (xlsx, fast-xml-parser, sql.js) are lazy-loaded on demand during stock import.
 
 export type SupportedImportFormat = 'xlsx' | 'xls' | 'csv' | 'tsv' | 'json' | 'xml' | 'sqlite' | 'sql';
 
@@ -375,6 +373,7 @@ function parseSqlDump(sqlText: string): ParsedSourceTable[] {
 }
 
 async function parseSqliteBuffer(buffer: Buffer): Promise<ParsedSourceTable[]> {
+  const { default: initSqlJs } = await import('sql.js');
   const SQL = await initSqlJs();
   const db = new SQL.Database(new Uint8Array(buffer));
   try {
@@ -416,6 +415,7 @@ export async function parseStockDatabaseBuffer(
   let tables: ParsedSourceTable[] = [];
 
   if (format === 'xlsx' || format === 'xls') {
+    const XLSX = await import('xlsx');
     const workbook = XLSX.read(buffer, { type: 'buffer' });
     for (const sheetName of workbook.SheetNames) {
       const sheet = workbook.Sheets[sheetName];
@@ -438,6 +438,7 @@ export async function parseStockDatabaseBuffer(
     tables = extractBestArrayFromObject(json, 'articles');
   } else if (format === 'xml') {
     const text = decodeBufferText(buffer);
+    const { XMLParser } = await import('fast-xml-parser');
     const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '' });
     const parsed = parser.parse(text);
     tables = extractBestArrayFromObject(parsed, 'articles');

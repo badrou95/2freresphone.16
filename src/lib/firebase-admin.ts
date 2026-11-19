@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { initializeApp, getApps } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
+import type { Auth } from 'firebase-admin/auth';
 
 function resolveFirebaseProjectId(): string {
   if (process.env.FIREBASE_PROJECT_ID) {
@@ -24,10 +23,17 @@ function resolveFirebaseProjectId(): string {
   return 'xenon-tempest-nq7xb';
 }
 
-if (!getApps().length) {
-  initializeApp({
-    projectId: resolveFirebaseProjectId(),
-  });
-}
+let cachedAuth: Auth | null = null;
 
-export const adminAuth = getAuth();
+export async function getAdminAuth(): Promise<Auth> {
+  if (cachedAuth) return cachedAuth;
+  const { initializeApp, getApps } = await import('firebase-admin/app');
+  const { getAuth } = await import('firebase-admin/auth');
+  if (!getApps().length) {
+    initializeApp({
+      projectId: resolveFirebaseProjectId(),
+    });
+  }
+  cachedAuth = getAuth();
+  return cachedAuth;
+}

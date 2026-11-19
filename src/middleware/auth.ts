@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { eq } from 'drizzle-orm';
-import { adminAuth } from '../lib/firebase-admin.ts';
+import { getAdminAuth } from '../lib/firebase-admin.ts';
 import { db } from '../db/index.ts';
 import { adminUsers } from '../db/schema.ts';
 
@@ -83,6 +83,7 @@ export const requireAdmin = async (
 
   const token = authHeader.split('Bearer ')[1];
   try {
+    const adminAuth = await getAdminAuth();
     const decoded = await adminAuth.verifyIdToken(token);
     req.user = decoded;
 
