@@ -37,7 +37,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           setAdmin(null);
-          setAuthError(data.error || 'Accès administrateur refusé.');
+          if (data.error) {
+            setAuthError(data.error);
+          } else if (res.status >= 500) {
+            setAuthError(`Erreur serveur (${res.status}) lors de la vérification du compte administrateur.`);
+          } else {
+            setAuthError('Accès administrateur refusé.');
+          }
         } else {
           setAdmin(data.admin);
         }

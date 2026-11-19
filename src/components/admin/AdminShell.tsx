@@ -241,7 +241,10 @@ export function AdminShell({
                 onClick={signOut}
                 className="w-full py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold"
               >
-                Changer de compte Google ({user.email})
+                Changer de compte Google
+                {user.email || user.providerData?.[0]?.email
+                  ? ` (${user.email || user.providerData?.[0]?.email})`
+                  : ''}
               </button>
             )}
 

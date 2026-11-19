@@ -28,14 +28,14 @@ import {
   stockMovements,
   storeSettings,
 } from './src/db/schema.ts';
-import { AuthRequest, requireAdmin } from './src/middleware/auth.ts';
+import { type AuthRequest, requireAdmin } from './src/middleware/auth.ts';
 import { ensureDatabaseSeeded } from './src/server/seed.ts';
 import { evaluateProductLowStock, syncAllLowStockAlerts } from './src/server/stockAlerts.ts';
 import {
   buildDifferentialSyncPlan,
-  ColumnMapping,
+  type ColumnMapping,
   parseStockDatabaseBuffer,
-  StockSyncMode,
+  type StockSyncMode,
 } from './src/server/stockImportParser.ts';
 import { ALGERIA_WILAYAS, getWilayaByCode } from './src/shared/algeria.ts';
 import {
@@ -45,7 +45,7 @@ import {
   generateOrderReference,
   isValidAlgerianPhone,
   normalizeAlgerianPhone,
-  OrderStatus,
+  type OrderStatus,
   shouldDeductStockOnStatus,
   slugify,
 } from './src/shared/domain.ts';
