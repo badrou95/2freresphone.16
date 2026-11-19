@@ -1,12 +1,11 @@
 import type { Request, Response, NextFunction } from 'express';
-import type { DecodedIdToken } from 'firebase-admin/auth';
 import { eq } from 'drizzle-orm';
-import { getAdminAuth } from '../lib/firebase-admin.ts';
+import { verifyFirebaseIdToken, type VerifiedFirebaseToken } from '../lib/firebase-admin.ts';
 import { db } from '../db/index.ts';
 import { adminUsers } from '../db/schema.ts';
 
 export interface AuthRequest extends Request {
-  user?: DecodedIdToken;
+  user?: VerifiedFirebaseToken;
   adminUser?: typeof adminUsers.$inferSelect;
 }
 
@@ -20,7 +19,7 @@ const INITIAL_ADMIN_EMAILS = Array.from(
   ),
 );
 
-export async function getOrCreateAdminRecord(decoded: DecodedIdToken) {
+export async function getOrCreateAdminRecord(decoded: VerifiedFirebaseToken) {
   const email = (decoded.email || '').toLowerCase();
   if (!email) return null;
 
@@ -83,8 +82,7 @@ export const requireAdmin = async (
 
   const token = authHeader.split('Bearer ')[1];
   try {
-    const adminAuth = await getAdminAuth();
-    const decoded = await adminAuth.verifyIdToken(token);
+    const decoded = await verifyFirebaseIdToken(token);
     req.user = decoded;
 
     const admin = await getOrCreateAdminRecord(decoded);

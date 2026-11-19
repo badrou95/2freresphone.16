@@ -20,7 +20,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  const verifyAdminUser = React.useCallback(async (fbUser: User | null) => {
+  const verifyAdminUser = React.useCallback(async (fbUser: User | null, forceRefresh = false) => {
     setUser(fbUser);
     setAuthError(null);
     if (!fbUser) {
@@ -31,7 +31,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 12000);
     try {
-      const token = await fbUser.getIdToken();
+      const token = await fbUser.getIdToken(forceRefresh);
       const res = await fetch('/api/admin/me', {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
@@ -64,7 +64,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (fbUser) => {
-      void verifyAdminUser(fbUser);
+      void verifyAdminUser(fbUser, false);
     });
     return () => unsub();
   }, [verifyAdminUser]);
@@ -74,7 +74,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLoading(true);
     try {
       const cred = await signInWithPopup(auth, googleAuthProvider);
-      await verifyAdminUser(cred.user);
+      await verifyAdminUser(cred.user, true);
     } catch (err: any) {
       setLoading(false);
       if (err?.code === 'auth/popup-closed-by-user') {
