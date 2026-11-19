@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "2Frères Phone",
+  "description": "Plateforme e-commerce officielle 2Frères Phone en Algérie — Accessoires téléphoniques, jeux vidéo, abonnements numériques et back-office de gestion complet.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

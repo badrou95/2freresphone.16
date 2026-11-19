@@ -1,0 +1,71 @@
+export interface WilayaInfo {
+  code: string;
+  name: string;
+  region: 'centre' | 'est' | 'ouest' | 'sud';
+}
+
+export const ALGERIA_WILAYAS: WilayaInfo[] = [
+  { code: '01', name: 'Adrar', region: 'sud' },
+  { code: '02', name: 'Chlef', region: 'centre' },
+  { code: '03', name: 'Laghouat', region: 'sud' },
+  { code: '04', name: 'Oum El Bouaghi', region: 'est' },
+  { code: '05', name: 'Batna', region: 'est' },
+  { code: '06', name: 'Béjaïa', region: 'centre' },
+  { code: '07', name: 'Biskra', region: 'sud' },
+  { code: '08', name: 'Béchar', region: 'sud' },
+  { code: '09', name: 'Blida', region: 'centre' },
+  { code: '10', name: 'Bouira', region: 'centre' },
+  { code: '11', name: 'Tamanrasset', region: 'sud' },
+  { code: '12', name: 'Tébessa', region: 'est' },
+  { code: '13', name: 'Tlemcen', region: 'ouest' },
+  { code: '14', name: 'Tiaret', region: 'ouest' },
+  { code: '15', name: 'Tizi Ouzou', region: 'centre' },
+  { code: '16', name: 'Alger', region: 'centre' },
+  { code: '17', name: 'Djelfa', region: 'sud' },
+  { code: '18', name: 'Jijel', region: 'est' },
+  { code: '19', name: 'Sétif', region: 'est' },
+  { code: '20', name: 'Saïda', region: 'ouest' },
+  { code: '21', name: 'Skikda', region: 'est' },
+  { code: '22', name: 'Sidi Bel Abbès', region: 'ouest' },
+  { code: '23', name: 'Annaba', region: 'est' },
+  { code: '24', name: 'Guelma', region: 'est' },
+  { code: '25', name: 'Constantine', region: 'est' },
+  { code: '26', name: 'Médéa', region: 'centre' },
+  { code: '27', name: 'Mostaganem', region: 'ouest' },
+  { code: '28', name: "M'Sila", region: 'centre' },
+  { code: '29', name: 'Mascara', region: 'ouest' },
+  { code: '30', name: 'Ouargla', region: 'sud' },
+  { code: '31', name: 'Oran', region: 'ouest' },
+  { code: '32', name: 'El Bayadh', region: 'sud' },
+  { code: '33', name: 'Illizi', region: 'sud' },
+  { code: '34', name: 'Bordj Bou Arréridj', region: 'est' },
+  { code: '35', name: 'Boumerdès', region: 'centre' },
+  { code: '36', name: 'El Tarf', region: 'est' },
+  { code: '37', name: 'Tindouf', region: 'sud' },
+  { code: '38', name: 'Tissemsilt', region: 'ouest' },
+  { code: '39', name: 'El Oued', region: 'sud' },
+  { code: '40', name: 'Khenchela', region: 'est' },
+  { code: '41', name: 'Souk Ahras', region: 'est' },
+  { code: '42', name: 'Tipaza', region: 'centre' },
+  { code: '43', name: 'Mila', region: 'est' },
+  { code: '44', name: 'Aïn Defla', region: 'centre' },
+  { code: '45', name: 'Naâma', region: 'sud' },
+  { code: '46', name: 'Aïn Témouchent', region: 'ouest' },
+  { code: '47', name: 'Ghardaïa', region: 'sud' },
+  { code: '48', name: 'Relizane', region: 'ouest' },
+  { code: '49', name: 'Timimoun', region: 'sud' },
+  { code: '50', name: 'Bordj Badji Mokhtar', region: 'sud' },
+  { code: '51', name: 'Ouled Djellal', region: 'sud' },
+  { code: '52', name: 'Béni Abbès', region: 'sud' },
+  { code: '53', name: 'In Salah', region: 'sud' },
+  { code: '54', name: 'In Guezzam', region: 'sud' },
+  { code: '55', name: 'Touggourt', region: 'sud' },
+  { code: '56', name: 'Djanet', region: 'sud' },
+  { code: '57', name: "El M'Ghair", region: 'sud' },
+  { code: '58', name: 'El Meniaa', region: 'sud' },
+];
+
+export function getWilayaByCode(code: string): WilayaInfo | undefined {
+  const normalized = code.trim().padStart(2, '0');
+  return ALGERIA_WILAYAS.find((w) => w.code === normalized);
+}
