@@ -4,7 +4,6 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
-import { createServer as createViteServer } from 'vite';
 import { db } from './src/db/index.ts';
 import {
   carriers,
@@ -59,7 +58,7 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB max for stock DBs / photos
 });
 
-function createApp() {
+export function createApp() {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
   app.use(express.urlencoded({ extended: true, limit: '15mb' }));
@@ -2529,6 +2528,7 @@ async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -2548,4 +2548,7 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
