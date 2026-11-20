@@ -46,6 +46,7 @@ import {
 } from './AdminLogisticsAndSettings';
 import { AdminPrinter } from './AdminPrinter';
 import { AdminPagePilot } from './AdminPagePilot';
+import { MdfIdfBinaryDecoderModule } from './MdfIdfBinaryDecoderModule';
 
 interface AdminShellProps {
   publicSettings: StoreSettings;
@@ -87,6 +88,7 @@ export function AdminShell({
     return 'overview';
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showGlobalMdfModal, setShowGlobalMdfModal] = useState(false);
 
   // Contextual sub-navigation flags
   const [productsOnlyMissingPhotos, setProductsOnlyMissingPhotos] = useState(false);
@@ -338,7 +340,7 @@ export function AdminShell({
       items: [
         {
           id: 'mdf_import',
-          label: 'Sauvegarde .MDF + .IDF',
+          label: 'Ajouter le Stock (.MDF + .IDF)',
           icon: Database,
           badge: 'MDF/IDF',
         },
@@ -510,11 +512,11 @@ export function AdminShell({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => handleNavigateTab('mdf_import')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-sm"
+              onClick={() => setShowGlobalMdfModal(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-sm"
             >
               <Database className="w-3.5 h-3.5" />
-              <span>Sauvegarde .MDF + .IDF</span>
+              <span>+ Ajouter le Stock (.MDF + .IDF / Compta)</span>
             </button>
             <button
               type="button"
@@ -539,6 +541,8 @@ export function AdminShell({
             <AdminOverview
               data={dashboard}
               products={products}
+              categories={categories}
+              onRefresh={handleRefresh}
               onNavigateTab={handleNavigateTab}
             />
           )}
@@ -628,6 +632,36 @@ export function AdminShell({
           )}
         </main>
       </div>
+
+      {/* Global Modal for .MDF + .IDF Binary Decoder & Stock/Compta Importer */}
+      {showGlobalMdfModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="w-full max-w-4xl my-8 relative">
+            <div className="flex justify-end mb-2">
+              <button
+                type="button"
+                onClick={() => setShowGlobalMdfModal(false)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-slate-900 text-white hover:bg-slate-800 text-xs font-bold shadow"
+              >
+                <X className="w-4 h-4" />
+                <span>Fermer la fenêtre</span>
+              </button>
+            </div>
+            <MdfIdfBinaryDecoderModule
+              categories={categories}
+              onRefresh={handleRefresh}
+              onNavigateCompta={() => {
+                setShowGlobalMdfModal(false);
+                handleNavigateTab('stock', { subTab: 'compta' });
+              }}
+              onNavigateStockLevels={() => {
+                setShowGlobalMdfModal(false);
+                handleNavigateTab('stock', { subTab: 'levels' });
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

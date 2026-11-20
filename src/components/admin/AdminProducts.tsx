@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   Camera,
   Check,
+  Database,
   FolderPlus,
   ImagePlus,
   Pencil,
@@ -19,6 +20,7 @@ import { printProductThermalLabels } from '../../lib/printer';
 import { CATEGORY_GROUPS, formatDzd } from '../../shared/domain';
 import { StoreSettings } from '../../types';
 import { ProductImage } from '../ProductImage';
+import { MdfIdfBinaryDecoderModule } from './MdfIdfBinaryDecoderModule';
 import { OkwinImageStudio, ProductColorsEditor } from './OkwinImageStudio';
 
 interface AdminProductsProps {
@@ -39,6 +41,7 @@ export function AdminProducts({
   onRefresh,
 }: AdminProductsProps) {
   const [subTab, setSubTab] = useState<'products' | 'categories'>('products');
+  const [showMdfDecoder, setShowMdfDecoder] = useState<boolean>(true);
   const [search, setSearch] = useState('');
   const [onlyMissingPhotos, setOnlyMissingPhotos] = useState(initialOnlyMissingPhotos);
   const [typeFilter, setTypeFilter] = useState<'all' | 'physical' | 'digital'>('all');
@@ -537,16 +540,37 @@ export function AdminProducts({
         </div>
 
         {subTab === 'products' && (
-          <button
-            type="button"
-            onClick={openCreateModal}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Nouveau produit</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowMdfDecoder((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-sm"
+            >
+              <Database className="w-4 h-4" />
+              <span>
+                {showMdfDecoder
+                  ? 'Masquer Décodage Binaire .MDF + .IDF'
+                  : '+ Ajouter le Stock (.MDF + .IDF / Compta)'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={openCreateModal}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Nouveau produit</span>
+            </button>
+          </div>
         )}
       </div>
+
+      {showMdfDecoder && (
+        <MdfIdfBinaryDecoderModule
+          categories={categories}
+          onRefresh={onRefresh}
+        />
+      )}
 
       {subTab === 'products' ? (
         <>

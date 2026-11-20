@@ -21,56 +21,37 @@ import {
 } from 'recharts';
 import { formatDzd, ORDER_STATUS_LABELS, OrderStatus } from '../../shared/domain';
 import { FinancialMarginWidget } from './FinancialMarginWidget';
+import { MdfIdfBinaryDecoderModule } from './MdfIdfBinaryDecoderModule';
 
 interface AdminOverviewProps {
   data: any;
   products?: any[];
+  categories?: any[];
+  onRefresh?: () => void;
   onNavigateTab: (tab: string, extra?: any) => void;
 }
 
-export function AdminOverview({ data, products = [], onNavigateTab }: AdminOverviewProps) {
+export function AdminOverview({
+  data,
+  products = [],
+  categories = [],
+  onRefresh,
+  onNavigateTab,
+}: AdminOverviewProps) {
   if (!data) return null;
   const { kpis, chartSeries, topWilayas, activeLowStockAlerts, recentOrders } = data;
 
   return (
     <div className="space-y-6">
-      {/* Prominent .MDF + .IDF Stock & Compta Integration Card */}
-      <div className="bg-white border-2 border-blue-200 rounded-xl p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-sm">
-        <div className="flex items-start gap-3.5">
-          <div className="p-3 rounded-xl bg-blue-700 text-white shrink-0">
-            <Database className="w-5 h-5" />
-          </div>
-          <div>
-            <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-100 text-blue-900 text-[10px] font-bold uppercase tracking-wider mb-1">
-              Sauvegarde .MDF + .IDF · Stock &amp; Comptabilité
-            </span>
-            <h2 className="font-display font-bold text-sm sm:text-base text-slate-900">
-              Intégrez vos fichiers .MDF et .IDF pour générer votre Stock et toute votre Compta
-            </h2>
-            <p className="text-xs text-slate-600 mt-0.5">
-              Chargez vos deux fichiers de sauvegarde (Point 1 : <strong>.mdf</strong> et Point 2 : <strong>.idf</strong>) pour enregistrer automatiquement tous vos produits, prix d’achat/vente et votre bilan comptable.
-            </p>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => onNavigateTab('mdf_import')}
-            className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-sm transition-colors"
-          >
-            <Database className="w-3.5 h-3.5" />
-            <span>Importer mes fichiers .MDF + .IDF</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onNavigateTab('stock', { subTab: 'compta' })}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-emerald-700 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold transition-colors"
-          >
-            <Calculator className="w-3.5 h-3.5" />
-            <span>Voir ma Comptabilité &amp; Bilan</span>
-          </button>
-        </div>
-      </div>
+      {/* Direct Embedded .MDF + .IDF Binary Decoder & Stock/Compta Importer on Main Dashboard */}
+      <MdfIdfBinaryDecoderModule
+        categories={categories}
+        onRefresh={() => {
+          if (onRefresh) onRefresh();
+        }}
+        onNavigateCompta={() => onNavigateTab('stock', { subTab: 'compta' })}
+        onNavigateStockLevels={() => onNavigateTab('stock', { subTab: 'levels' })}
+      />
       {/* Prominent Low Stock Alert Banner */}
       {activeLowStockAlerts && activeLowStockAlerts.length > 0 && (
         <div

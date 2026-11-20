@@ -24,6 +24,7 @@ import { printProductThermalLabels } from '../../lib/printer';
 import { formatDzd, toCsv } from '../../shared/domain';
 import { StoreSettings } from '../../types';
 import { FinancialMarginWidget } from './FinancialMarginWidget';
+import { MdfIdfBinaryDecoderModule } from './MdfIdfBinaryDecoderModule';
 
 interface AdminStockImportProps {
   products: any[];
@@ -538,7 +539,7 @@ export function AdminStockImport({
           }`}
         >
           <Database className="w-3.5 h-3.5" />
-          <span>1. Importer Sauvegarde (.MDF + .IDF / Stock &amp; Compta)</span>
+          <span>1. Décodage Binaire .MDF + .IDF (Ajouter le Stock &amp; Compta)</span>
         </button>
         <button
           type="button"
@@ -547,7 +548,7 @@ export function AdminStockImport({
             subTab === 'levels' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-700 hover:bg-white/60'
           }`}
         >
-          2. Gestion &amp; Niveaux de stock ({physicalProducts.length})
+          2. Ajouter &amp; Gérer le Stock ({physicalProducts.length})
         </button>
         <button
           type="button"
@@ -1520,38 +1521,13 @@ export function AdminStockImport({
 
       {subTab === 'levels' && (
         <div className="space-y-4">
-          {/* Quick Shortcut Banner to .MDF + .IDF Backup Importer */}
-          <div className="bg-blue-50/80 border border-blue-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <Database className="w-5 h-5 text-blue-700 shrink-0 mt-0.5" />
-              <div>
-                <p className="text-xs font-bold text-slate-900">
-                  Intégration Sauvegarde .MDF + .IDF (Générer tout votre Stock &amp; votre Comptabilité)
-                </p>
-                <p className="text-xs text-slate-600 mt-0.5">
-                  Importez vos deux fichiers <strong>.mdf</strong> et <strong>.idf</strong> en un clic pour créer vos articles, quantités, prix d’achat/vente et votre bilan comptable.
-                </p>
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => handleChangeSubTab('import')}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-sm"
-              >
-                <Upload className="w-3.5 h-3.5" />
-                <span>Importer mes fichiers .MDF + .IDF</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleChangeSubTab('compta')}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-emerald-700 bg-white hover:bg-emerald-50 text-emerald-800 text-xs font-semibold"
-              >
-                <Calculator className="w-3.5 h-3.5" />
-                <span>Voir ma Compta ({accountingEntriesList.length})</span>
-              </button>
-            </div>
-          </div>
+          {/* Always-Visible .MDF + .IDF Binary Decoder & Stock/Compta Importer inside "Ajouter & Gérer le Stock" */}
+          <MdfIdfBinaryDecoderModule
+            categories={categories}
+            onRefresh={onRefresh}
+            onNavigateCompta={() => handleChangeSubTab('compta')}
+            onNavigateStockLevels={() => handleChangeSubTab('levels')}
+          />
 
           {stockFeedback && (
             <div
