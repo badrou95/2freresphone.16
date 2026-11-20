@@ -563,8 +563,18 @@ export function MdfIdfBinaryDecoderModule({
               {preview.accountingPreview && (
                 <span className="px-2.5 py-1 rounded bg-amber-100 text-amber-900 text-xs font-bold">
                   {preview.accountingPreview.totalEntries} écriture(s) Compta · Valeur Stock :{' '}
-                  {formatDzd(preview.accountingPreview.stockSaleValuationDzd || 0)} (Marge : +
-                  {formatDzd(preview.accountingPreview.stockPotentialMarginDzd || 0)})
+                  {formatDzd(
+                    preview.accountingPreview.stockSaleValueDzd ||
+                      preview.accountingPreview.stockSaleValuationDzd ||
+                      0,
+                  )}{' '}
+                  (Marge : +
+                  {formatDzd(
+                    preview.accountingPreview.stockMarginDzd ||
+                      preview.accountingPreview.stockPotentialMarginDzd ||
+                      0,
+                  )}
+                  )
                 </span>
               )}
             </div>

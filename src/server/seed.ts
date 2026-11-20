@@ -396,13 +396,16 @@ const DDL_STATEMENTS: string[] = [
 ];
 
 async function ensureTablesExist(): Promise<void> {
-  const check = await db.execute(sql`SELECT to_regclass('public.store_settings') AS tbl`);
-  const existing = (check.rows?.[0] as { tbl?: string | null } | undefined)?.tbl;
-  if (!existing) {
+  const check = await db.execute(
+    sql`SELECT to_regclass('public.store_settings') AS tbl, to_regclass('public.accounting_entries') AS acc_tbl, to_regclass('public.landing_pages') AS lp_tbl`,
+  );
+  const row = check.rows?.[0] as
+    | { tbl?: string | null; acc_tbl?: string | null; lp_tbl?: string | null }
+    | undefined;
+  if (!row?.tbl || !row?.acc_tbl || !row?.lp_tbl) {
     for (const stmt of DDL_STATEMENTS) {
       await db.execute(sql.raw(stmt));
     }
-    return;
   }
   // Ensure newly added columns/tables exist on pre-existing databases (e.g. Neon Postgres on Vercel)
   try {
@@ -418,16 +421,6 @@ async function ensureTablesExist(): Promise<void> {
     }
   } catch (e) {
     console.warn('Skipping catalog_initialized DDL check:', e);
-  }
-
-  try {
-    const lpCheck = await db.execute(sql`SELECT to_regclass('public.landing_pages') AS tbl`);
-    const lpExisting = (lpCheck.rows?.[0] as { tbl?: string | null } | undefined)?.tbl;
-    if (!lpExisting) {
-      await db.execute(sql.raw(DDL_STATEMENTS[DDL_STATEMENTS.length - 1]));
-    }
-  } catch (e) {
-    console.warn('Skipping landing_pages DDL check:', e);
   }
 
   try {

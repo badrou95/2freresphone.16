@@ -1381,12 +1381,48 @@ export function createApp() {
     }
   });
 
+  // Helper to guarantee accounting_entries table exists on any pre-existing PostgreSQL / Neon DB
+  let accountingTableChecked = false;
+  const ensureAccountingTableReady = async () => {
+    if (accountingTableChecked) return;
+    try {
+      await db.execute(
+        sql.raw(`CREATE TABLE IF NOT EXISTS accounting_entries (
+          id serial PRIMARY KEY,
+          reference text NOT NULL,
+          entry_type text NOT NULL DEFAULT 'sale',
+          category text NOT NULL DEFAULT 'Ventes & Caisse',
+          label text NOT NULL,
+          partner_name text NOT NULL DEFAULT '',
+          amount_dzd integer NOT NULL DEFAULT 0,
+          cost_dzd integer NOT NULL DEFAULT 0,
+          margin_dzd integer NOT NULL DEFAULT 0,
+          payment_method text NOT NULL DEFAULT 'Espèces / Caisse',
+          source_file text,
+          import_id integer REFERENCES stock_imports(id) ON DELETE SET NULL,
+          order_id integer REFERENCES orders(id) ON DELETE SET NULL,
+          entry_date timestamp NOT NULL DEFAULT now(),
+          notes text NOT NULL DEFAULT '',
+          created_at timestamp NOT NULL DEFAULT now()
+        )`),
+      );
+      accountingTableChecked = true;
+    } catch (e) {
+      console.warn('ensureAccountingTableReady warning:', e);
+    }
+  };
+
   // 3. Sales Ledger & Complete Accounting (Compta)
   app.get('/api/admin/sales', requireAdmin, async (_req, res) => {
     try {
+      await ensureAccountingTableReady();
       const [list, entries] = await Promise.all([
         db.select().from(sales).orderBy(desc(sales.recordedAt)),
-        db.select().from(accountingEntries).orderBy(desc(accountingEntries.entryDate), desc(accountingEntries.id)),
+        db
+          .select()
+          .from(accountingEntries)
+          .orderBy(desc(accountingEntries.entryDate), desc(accountingEntries.id))
+          .catch(() => []),
       ]);
       return res.json({ sales: list, accountingEntries: entries });
     } catch (error) {
@@ -1397,6 +1433,7 @@ export function createApp() {
 
   app.post('/api/admin/accounting', requireAdmin, async (req: AuthRequest, res) => {
     try {
+      await ensureAccountingTableReady();
       const b = req.body || {};
       const label = String(b.label || '').trim();
       if (!label) {
@@ -1909,6 +1946,7 @@ export function createApp() {
   // 6. Stock Management, Alerts & Universal Stock Database Import Engine
   app.get('/api/admin/stock', requireAdmin, async (_req, res) => {
     try {
+      await ensureAccountingTableReady();
       await syncAllLowStockAlerts();
       const [settingsRow] = await db.select().from(storeSettings).limit(1);
       const globalThreshold = settingsRow?.defaultLowStockThreshold ?? 10;
@@ -1936,7 +1974,8 @@ export function createApp() {
         .select()
         .from(accountingEntries)
         .orderBy(desc(accountingEntries.entryDate), desc(accountingEntries.id))
-        .limit(200);
+        .limit(300)
+        .catch(() => []);
 
       return res.json({
         globalLowStockThreshold: globalThreshold,
@@ -2286,22 +2325,31 @@ export function createApp() {
         })
         .returning();
 
+      await ensureAccountingTableReady();
+      await db.update(storeSettings).set({ catalogInitialized: true });
+
+      const clampInt32 = (val: unknown, min = -2000000000, max = 2000000000): number => {
+        const n = Math.round(Number(val) || 0);
+        if (!Number.isFinite(n)) return 0;
+        return Math.min(max, Math.max(min, n));
+      };
+
       let addedCount = 0;
       let updatedCount = 0;
       const addedProductIds: number[] = [];
 
-      // 1. Add ONLY new articles
+      // Pre-track used SKUs so we can batch-insert 880+ products without single-row SKU collisions
+      const usedSkus = new Set<string>(existing.map((e) => String(e.sku || '').toLowerCase()));
+
+      // 1a. Resolve or create categories first
       for (const item of diff.toAdd) {
-        let resolvedCatId = defaultCategoryId;
         if (item.categoryName) {
-          const catSlug = slugify(item.categoryName);
-          if (catByNormName.has(catSlug)) {
-            resolvedCatId = catByNormName.get(catSlug)!;
-          } else {
+          const catSlug = slugify(item.categoryName) || 'catalogue-mdf';
+          if (!catByNormName.has(catSlug)) {
             const [newCat] = await db
               .insert(categories)
               .values({
-                name: item.categoryName,
+                name: String(item.categoryName).slice(0, 120),
                 slug: `${catSlug}-${Date.now().toString(36).slice(-3)}-${item.rowIndex}`,
                 categoryGroup: item.productType === 'digital' ? 'digital' : 'accessories',
                 sortOrder: 99,
@@ -2311,133 +2359,161 @@ export function createApp() {
               .returning();
             if (newCat) {
               catByNormName.set(catSlug, newCat.id);
-              resolvedCatId = newCat.id;
             }
           }
         }
+      }
 
-        const uniqueSlug = `${slugify(item.name)}-${importRecord.id}-${item.rowIndex}`;
-        const safeSku = `${item.sku}`;
-        let [inserted] = await db
-          .insert(products)
-          .values({
-            categoryId: resolvedCatId,
-            sku: safeSku,
-            barcode: item.barcode,
-            externalRef: item.externalRef,
-            name: item.name,
-            slug: uniqueSlug,
-            brand: item.brand,
-            shortDescription: item.description ? item.description.slice(0, 160) : null,
-            description: item.description || '',
-            productType: item.productType,
-            priceDzd: item.priceDzd,
-            costPriceDzd: item.costPriceDzd,
-            stockQuantity: item.stockQuantity,
-            lowStockThreshold: item.lowStockThreshold,
-            isFeatured: false,
-            isActive: true,
-          })
-          .onConflictDoNothing()
-          .returning();
-
-        // Fallback if SKU collided with an existing record
-        if (!inserted) {
-          const fallbackSku = `${safeSku}-${importRecord.id}-${item.rowIndex}`;
-          [inserted] = await db
-            .insert(products)
-            .values({
-              categoryId: resolvedCatId,
-              sku: fallbackSku,
-              barcode: item.barcode,
-              externalRef: item.externalRef,
-              name: item.name,
-              slug: `${uniqueSlug}-alt`,
-              brand: item.brand,
-              shortDescription: item.description ? item.description.slice(0, 160) : null,
-              description: item.description || '',
-              productType: item.productType,
-              priceDzd: item.priceDzd,
-              costPriceDzd: item.costPriceDzd,
-              stockQuantity: item.stockQuantity,
-              lowStockThreshold: item.lowStockThreshold,
-              isFeatured: false,
-              isActive: true,
-            })
-            .onConflictDoNothing()
-            .returning();
+      // 1b. Batch-insert new articles in chunks of 80 for fast execution on serverless Postgres
+      const productRowsToInsert = diff.toAdd.map((item, idx) => {
+        let resolvedCatId = defaultCategoryId;
+        if (item.categoryName) {
+          const catSlug = slugify(item.categoryName) || 'catalogue-mdf';
+          if (catByNormName.has(catSlug)) {
+            resolvedCatId = catByNormName.get(catSlug)!;
+          }
         }
+        let candidateSku = String(item.sku || `MDF-${importRecord.id}-${idx + 1}`).trim().slice(0, 80);
+        if (!candidateSku || usedSkus.has(candidateSku.toLowerCase())) {
+          candidateSku = `${candidateSku || 'MDF'}-${importRecord.id}-${item.rowIndex}`;
+        }
+        usedSkus.add(candidateSku.toLowerCase());
 
-        if (inserted) {
+        const baseSlug = slugify(item.name) || 'article';
+        const uniqueSlug = `${baseSlug.slice(0, 80)}-${importRecord.id}-${item.rowIndex}-${idx}`;
+
+        return {
+          categoryId: resolvedCatId,
+          sku: candidateSku,
+          barcode: item.barcode ? String(item.barcode).slice(0, 80) : null,
+          externalRef: item.externalRef ? String(item.externalRef).slice(0, 80) : null,
+          name: String(item.name || 'Article Stock').slice(0, 220),
+          slug: uniqueSlug,
+          brand: item.brand ? String(item.brand).slice(0, 80) : null,
+          shortDescription: item.description ? String(item.description).slice(0, 160) : null,
+          description: item.description ? String(item.description) : '',
+          productType: item.productType,
+          priceDzd: clampInt32(item.priceDzd, 0),
+          costPriceDzd: clampInt32(item.costPriceDzd, 0),
+          stockQuantity: clampInt32(item.stockQuantity, 0),
+          lowStockThreshold: item.lowStockThreshold !== null ? clampInt32(item.lowStockThreshold, 0) : null,
+          isFeatured: false,
+          isActive: true,
+        };
+      });
+
+      const CHUNK_SIZE = 80;
+      const movementsToInsert: {
+        productId: number;
+        importId: number;
+        delta: number;
+        previousQty: number;
+        newQty: number;
+        reason: string;
+        createdBy: string;
+      }[] = [];
+
+      for (let i = 0; i < productRowsToInsert.length; i += CHUNK_SIZE) {
+        const chunk = productRowsToInsert.slice(i, i + CHUNK_SIZE);
+        const insertedChunk = await db
+          .insert(products)
+          .values(chunk)
+          .onConflictDoNothing()
+          .returning({ id: products.id, stockQuantity: products.stockQuantity });
+
+        for (const ins of insertedChunk) {
           addedCount += 1;
-          addedProductIds.push(inserted.id);
-          await db.insert(stockMovements).values({
-            productId: inserted.id,
+          addedProductIds.push(ins.id);
+          movementsToInsert.push({
+            productId: ins.id,
             importId: importRecord.id,
-            delta: item.stockQuantity,
+            delta: ins.stockQuantity,
             previousQty: 0,
-            newQty: item.stockQuantity,
-            reason: `Import logiciel (${combinedFileName})`,
+            newQty: ins.stockQuantity,
+            reason: `Import sauvegarde (${combinedFileName})`,
             createdBy: req.adminUser?.email || 'admin',
           });
-          await evaluateProductLowStock(inserted.id);
         }
       }
 
       // 2. Update existing articles if mode is add_and_update_stock or full_sync (ALWAYS preserving photos!)
       for (const entry of diff.toUpdate) {
+        const nextQty = clampInt32(entry.incoming.stockQuantity, 0);
         const updateData: Record<string, unknown> = {
-          stockQuantity: entry.incoming.stockQuantity,
+          stockQuantity: nextQty,
           updatedAt: new Date(),
         };
         if (syncMode === 'full_sync') {
-          if (entry.incoming.priceDzd > 0) updateData.priceDzd = entry.incoming.priceDzd;
-          if (entry.incoming.costPriceDzd > 0) updateData.costPriceDzd = entry.incoming.costPriceDzd;
-          if (entry.incoming.brand) updateData.brand = entry.incoming.brand;
-          if (entry.incoming.description) updateData.description = entry.incoming.description;
+          if (entry.incoming.priceDzd > 0) updateData.priceDzd = clampInt32(entry.incoming.priceDzd, 0);
+          if (entry.incoming.costPriceDzd > 0) updateData.costPriceDzd = clampInt32(entry.incoming.costPriceDzd, 0);
+          if (entry.incoming.brand) updateData.brand = String(entry.incoming.brand).slice(0, 80);
+          if (entry.incoming.description) updateData.description = String(entry.incoming.description);
         }
         await db.update(products).set(updateData).where(eq(products.id, entry.existing.id));
         if (entry.stockDelta !== 0) {
-          await db.insert(stockMovements).values({
+          movementsToInsert.push({
             productId: entry.existing.id,
             importId: importRecord.id,
-            delta: entry.stockDelta,
-            previousQty: entry.existing.stockQuantity,
-            newQty: entry.incoming.stockQuantity,
+            delta: clampInt32(entry.stockDelta),
+            previousQty: clampInt32(entry.existing.stockQuantity, 0),
+            newQty: nextQty,
             reason: `Synchro fichier stock (${combinedFileName})`,
             createdBy: req.adminUser?.email || 'admin',
           });
         }
-        await evaluateProductLowStock(entry.existing.id);
         updatedCount += 1;
+      }
+
+      // Batch-insert stock movements
+      for (let i = 0; i < movementsToInsert.length; i += CHUNK_SIZE) {
+        const movChunk = movementsToInsert.slice(i, i + CHUNK_SIZE);
+        await db.insert(stockMovements).values(movChunk).catch((e) => {
+          console.warn('Stock movement batch insert warning:', e);
+        });
       }
 
       // 3. Generate & store Complete Accounting ("Toute la Compta") in PostgreSQL
       let accountingGeneratedCount = 0;
       if (generateAccounting) {
+        await ensureAccountingTableReady();
         const extractedAccounting = extractAccountingEntriesFromTables(
           parsed.tables,
           selectedTableObj.rows,
           activeMapping,
           combinedFileName,
         );
-        for (const acc of extractedAccounting) {
-          await db.insert(accountingEntries).values({
-            reference: `${acc.reference}-${importRecord.id}`,
-            entryType: acc.entryType,
-            category: acc.category,
-            label: acc.label,
-            partnerName: acc.partnerName,
-            amountDzd: acc.amountDzd,
-            costDzd: acc.costDzd,
-            marginDzd: acc.marginDzd,
-            paymentMethod: acc.paymentMethod,
-            sourceFile: combinedFileName,
-            importId: importRecord.id,
-            entryDate: acc.entryDate ? new Date(acc.entryDate) : new Date(),
-            notes: acc.notes,
-          });
-          accountingGeneratedCount += 1;
+        const accountingRowsToInsert = extractedAccounting.map((acc, idx) => ({
+          reference: `${String(acc.reference || `CPT-${idx + 1}`).slice(0, 60)}-${importRecord.id}`,
+          entryType: acc.entryType || 'sale',
+          category: String(acc.category || 'Ventes & Encaissements').slice(0, 100),
+          label: String(acc.label || 'Écriture comptable importée').slice(0, 240),
+          partnerName: String(acc.partnerName || 'Sauvegarde .MDF/.IDF').slice(0, 140),
+          amountDzd: clampInt32(acc.amountDzd, 0),
+          costDzd: clampInt32(acc.costDzd, 0),
+          marginDzd: clampInt32(acc.marginDzd),
+          paymentMethod: String(acc.paymentMethod || 'Caisse / Sauvegarde').slice(0, 80),
+          sourceFile: String(combinedFileName).slice(0, 160),
+          importId: importRecord.id,
+          entryDate: acc.entryDate ? new Date(acc.entryDate) : new Date(),
+          notes: String(acc.notes || ''),
+        }));
+
+        for (let i = 0; i < accountingRowsToInsert.length; i += CHUNK_SIZE) {
+          const accChunk = accountingRowsToInsert.slice(i, i + CHUNK_SIZE);
+          try {
+            await db.insert(accountingEntries).values(accChunk);
+            accountingGeneratedCount += accChunk.length;
+          } catch (accErr) {
+            console.warn('Batch accounting insert fallback to single row:', accErr);
+            for (const singleAcc of accChunk) {
+              try {
+                await db.insert(accountingEntries).values(singleAcc);
+                accountingGeneratedCount += 1;
+              } catch (singleErr) {
+                console.warn('Skipping malformed accounting entry:', singleErr);
+              }
+            }
+          }
         }
       }
 
@@ -2465,12 +2541,14 @@ export function createApp() {
           });
       }
 
+      await syncAllLowStockAlerts().catch(() => {});
+
       const [finalImport] = await db
         .update(stockImports)
         .set({
           addedCount,
           updatedCount,
-          summaryJson: JSON.stringify({ addedProductIds, accountingGeneratedCount }),
+          summaryJson: JSON.stringify({ addedProductIds: addedProductIds.slice(0, 500), accountingGeneratedCount }),
         })
         .where(eq(stockImports.id, importRecord.id))
         .returning();

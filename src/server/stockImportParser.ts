@@ -666,33 +666,56 @@ interface ExtractedBinaryToken {
 }
 
 const SYSTEM_NOISE_PATTERNS =
-  /^(master|model|msdb|tempdb|sys\.|sysobjects|syscolumns|sysindexes|sysschobjs|syscolpars|sysidxstats|sysallocunits|sysrowsets|sysrscols|sysfiles1|dbo\.|PRIMARY|CLUSTERED|NONCLUSTERED|IDENTITY|CONSTRAINT|FOREIGN|REFERENCES|CHECK|DEFAULT|CREATE\s+TABLE|ALTER\s+TABLE|SELECT\s+|INSERT\s+INTO|UPDATE\s+|DELETE\s+FROM|SQL\s+Server|Microsoft|Windows|UTF-8|ISO-|http:\/\/|https:\/\/|xml\s+version|varchar|nvarchar|datetime|smallint|tinyint|bigint|decimal|numeric|uniqueidentifier|varbinary|timestamp|collation|Latin1_General|French_CI_AS|database_default|filegroup)/i;
+  /^(master|model|msdb|tempdb|sys\.|sysobjects|syscolumns|sysindexes|sysschobjs|syscolpars|sysidxstats|sysallocunits|sysrowsets|sysrscols|sysfiles1|dbo\.|INFORMATION_SCHEMA|db_owner|db_accessadmin|db_securityadmin|db_ddladmin|db_backupoperator|db_datareader|db_datawriter|sp_|xp_|fn_|PK_|FK_|IX_|DF_|CK_|PRIMARY|CLUSTERED|NONCLUSTERED|IDENTITY|CONSTRAINT|FOREIGN|REFERENCES|CHECK|DEFAULT|CREATE\s+TABLE|ALTER\s+TABLE|SELECT\s+|INSERT\s+INTO|UPDATE\s+|DELETE\s+FROM|SQL\s+Server|Microsoft|Windows|UTF-8|ISO-|http:\/\/|https:\/\/|xml\s+version|varchar|nvarchar|datetime|smallint|tinyint|bigint|decimal|numeric|uniqueidentifier|varbinary|timestamp|collation|Latin1_General|French_CI_AS|database_default|filegroup)/i;
 
 /**
  * Inspects binary bytes right before an extracted string token (SQL Server FixedVar row format
- * and WinDev/HFSQL binary record headers store INT16/INT32/FLOAT64 quantities and prices
- * immediately before variable-length strings).
+ * and WinDev/HFSQL binary record headers store INT16/INT32/FLOAT64/DECIMAL/MONEY quantities and prices
+ * in the fixed-length column section before the variable-length column offset array).
  */
 function extractNearbyBinaryNumbers(buffer: Buffer, stringOffset: number): number[] {
   const found: number[] = [];
-  const start = Math.max(0, stringOffset - 40);
-  const end = Math.max(0, stringOffset - 4);
+  // Skip the 12 bytes immediately preceding the string (which in SQL Server FixedVar rows are uint16 varOffsetArray byte offsets like 109)
+  const start = Math.max(0, stringOffset - 72);
+  const end = Math.max(0, stringOffset - 8);
+
+  // 1. Check IEEE-754 FLOAT64 (SQL Server FLOAT column: 8 bytes)
+  for (let pos = start; pos <= end && pos + 8 <= buffer.length; pos += 2) {
+    const dbl = buffer.readDoubleLE(pos);
+    if (
+      Number.isFinite(dbl) &&
+      dbl >= 50 &&
+      dbl <= 500000 &&
+      Math.abs(dbl - Math.round(dbl)) < 0.001
+    ) {
+      const rounded = Math.round(dbl);
+      if ((rounded < 1000 ? rounded % 10 === 0 : rounded % 50 === 0) && !found.includes(rounded)) {
+        found.push(rounded);
+      }
+    }
+  }
+
+  // 2. Check INT32 (SQL Server INT / DECIMAL scaled by 100)
   for (let pos = start; pos <= end && pos + 4 <= buffer.length; pos += 2) {
     const val32 = buffer.readInt32LE(pos);
+    // Reject 16-bit shifted unaligned reads (e.g. 0x000F0000 = 983040)
+    if ((val32 & 0xffff) === 0) continue;
     if (
       val32 > 0 &&
-      val32 <= 2500000 &&
+      val32 <= 500000 &&
       val32 !== 8192 &&
-      val32 !== 65535 &&
-      val32 !== 16777215
+      val32 !== 65535
     ) {
-      // Price-like (multiple of 5 or 10 or 50) or small stock quantity (1..500)
-      if ((val32 >= 1 && val32 <= 500) || (val32 >= 100 && val32 % 5 === 0)) {
+      const isRoundDzdPrice =
+        (val32 >= 100 && val32 < 1000 && val32 % 50 === 0) ||
+        (val32 >= 1000 && val32 <= 500000 && val32 % 100 === 0);
+      const isSmallStockQty = val32 >= 1 && val32 <= 80 && pos <= stringOffset - 16;
+      if (isRoundDzdPrice || isSmallStockQty) {
         if (!found.includes(val32)) found.push(val32);
       }
     }
   }
-  return found.slice(0, 5);
+  return found.slice(0, 6);
 }
 
 /**
