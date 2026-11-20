@@ -26,11 +26,15 @@ import { StarRating } from '../StarRating';
 export function AdminSales({
   sales,
   orders = [],
+  accountingEntries = [],
   storeSettings,
+  onOpenMdfImport,
 }: {
   sales: any[];
   orders?: any[];
+  accountingEntries?: any[];
   storeSettings?: any;
+  onOpenMdfImport?: () => void;
 }) {
   const [search, setSearch] = useState('');
 
@@ -41,6 +45,21 @@ export function AdminSales({
       `${s.orderReference} ${s.customerName} ${s.wilayaName}`.toLowerCase().includes(q),
     );
   }, [sales, search]);
+
+  const comptaTotals = useMemo(() => {
+    return (accountingEntries || []).reduce(
+      (acc: { stockValuationDzd: number; stockMarginDzd: number; salesDzd: number }, e: any) => {
+        if (e.entryType === 'stock_valuation') {
+          acc.stockValuationDzd += Number(e.amountDzd || 0);
+          acc.stockMarginDzd += Number(e.marginDzd || 0);
+        } else if (e.entryType === 'sale') {
+          acc.salesDzd += Number(e.amountDzd || 0);
+        }
+        return acc;
+      },
+      { stockValuationDzd: 0, stockMarginDzd: 0, salesDzd: 0 },
+    );
+  }, [accountingEntries]);
 
   const totals = useMemo(() => {
     return filtered.reduce(
@@ -81,11 +100,33 @@ export function AdminSales({
 
   return (
     <div className="space-y-5">
+      {onOpenMdfImport && (
+        <div className="bg-white border border-blue-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-bold text-blue-950">
+              Comptabilité &amp; Sauvegarde Base de Données (.MDF + .IDF)
+            </p>
+            <p className="text-xs text-slate-600 mt-0.5">
+              {accountingEntries.length > 0
+                ? `${accountingEntries.length} écriture(s) comptable(s) active(s) · Valorisation Stock : ${formatDzd(comptaTotals.stockValuationDzd)} · Marge Stock : +${formatDzd(comptaTotals.stockMarginDzd)}`
+                : 'Importez vos fichiers .mdf et .idf pour générer automatiquement tout votre stock et votre comptabilité.'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenMdfImport}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold"
+          >
+            <span>Importer .MDF + .IDF / Ouvrir la Compta</span>
+          </button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-500">Total encaissé (Livrées)</p>
+          <p className="text-xs text-slate-500">Total encaissé (Livrées + Compta)</p>
           <p className="mt-1 font-mono font-bold text-xl text-slate-900 tabular-nums">
-            {formatDzd(totals.collected)}
+            {formatDzd(totals.collected + comptaTotals.salesDzd)}
           </p>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
@@ -95,15 +136,15 @@ export function AdminSales({
           </p>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-500">Frais de livraison facturés</p>
-          <p className="mt-1 font-mono font-bold text-xl text-slate-900 tabular-nums">
-            {formatDzd(totals.shipping)}
+          <p className="text-xs text-slate-500">Valorisation Stock (Compta .MDF/.IDF)</p>
+          <p className="mt-1 font-mono font-bold text-xl text-blue-700 tabular-nums">
+            {formatDzd(comptaTotals.stockValuationDzd)}
           </p>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-500">Marge brute estimée</p>
+          <p className="text-xs text-slate-500">Marge brute cumulée</p>
           <p className="mt-1 font-mono font-bold text-xl text-emerald-700 tabular-nums">
-            {formatDzd(totals.margin)}
+            {formatDzd(totals.margin + comptaTotals.stockMarginDzd)}
           </p>
         </div>
       </div>

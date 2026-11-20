@@ -246,6 +246,24 @@ const DDL_STATEMENTS: string[] = [
     imported_by text NOT NULL DEFAULT 'admin',
     created_at timestamp NOT NULL DEFAULT now()
   )`,
+  `CREATE TABLE IF NOT EXISTS accounting_entries (
+    id serial PRIMARY KEY,
+    reference text NOT NULL,
+    entry_type text NOT NULL DEFAULT 'sale',
+    category text NOT NULL DEFAULT 'Ventes & Caisse',
+    label text NOT NULL,
+    partner_name text NOT NULL DEFAULT '',
+    amount_dzd integer NOT NULL DEFAULT 0,
+    cost_dzd integer NOT NULL DEFAULT 0,
+    margin_dzd integer NOT NULL DEFAULT 0,
+    payment_method text NOT NULL DEFAULT 'Espèces / Caisse',
+    source_file text,
+    import_id integer REFERENCES stock_imports(id) ON DELETE SET NULL,
+    order_id integer REFERENCES orders(id) ON DELETE SET NULL,
+    entry_date timestamp NOT NULL DEFAULT now(),
+    notes text NOT NULL DEFAULT '',
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
   `CREATE TABLE IF NOT EXISTS import_mapping_profiles (
     id serial PRIMARY KEY,
     profile_name text NOT NULL UNIQUE,

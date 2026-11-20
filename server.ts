@@ -8,6 +8,7 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { GoogleGenAI, Type } from '@google/genai';
 import { db, hasDatabaseConfig } from './src/db/index.ts';
 import {
+  accountingEntries,
   adminUsers,
   carriers,
   categories,
@@ -38,7 +39,9 @@ import { evaluateProductLowStock, syncAllLowStockAlerts } from './src/server/sto
 import {
   buildDifferentialSyncPlan,
   type ColumnMapping,
+  extractAccountingEntriesFromTables,
   parseStockDatabaseBuffer,
+  parseStockDatabaseFiles,
   type StockSyncMode,
 } from './src/server/stockImportParser.ts';
 import { ALGERIA_WILAYAS, getWilayaByCode } from './src/shared/algeria.ts';
@@ -59,7 +62,7 @@ const __dirname = path.dirname(__filename);
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB max for stock DBs / photos
+  limits: { fileSize: 150 * 1024 * 1024 }, // 150 MB max for .mdf / .idf database backups & photos
 });
 
 export function createApp() {
@@ -1378,14 +1381,73 @@ export function createApp() {
     }
   });
 
-  // 3. Sales Ledger
+  // 3. Sales Ledger & Complete Accounting (Compta)
   app.get('/api/admin/sales', requireAdmin, async (_req, res) => {
     try {
-      const list = await db.select().from(sales).orderBy(desc(sales.recordedAt));
-      return res.json({ sales: list });
+      const [list, entries] = await Promise.all([
+        db.select().from(sales).orderBy(desc(sales.recordedAt)),
+        db.select().from(accountingEntries).orderBy(desc(accountingEntries.entryDate), desc(accountingEntries.id)),
+      ]);
+      return res.json({ sales: list, accountingEntries: entries });
     } catch (error) {
       console.error('Admin sales error:', error);
-      return res.status(500).json({ error: 'Erreur lors du chargement des ventes.' });
+      return res.status(500).json({ error: 'Erreur lors du chargement des ventes et de la comptabilité.' });
+    }
+  });
+
+  app.post('/api/admin/accounting', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const b = req.body || {};
+      const label = String(b.label || '').trim();
+      if (!label) {
+        return res.status(400).json({ error: 'Le libellé de l’écriture comptable est obligatoire.' });
+      }
+      const entryType = ['sale', 'purchase', 'stock_valuation', 'expense', 'adjustment'].includes(b.entryType)
+        ? b.entryType
+        : 'sale';
+      const amountDzd = Math.max(0, Math.round(Number(b.amountDzd) || 0));
+      const costDzd = Math.max(0, Math.round(Number(b.costDzd) || 0));
+      const marginDzd =
+        b.marginDzd !== undefined && b.marginDzd !== ''
+          ? Math.round(Number(b.marginDzd))
+          : entryType === 'sale' || entryType === 'stock_valuation'
+          ? amountDzd - costDzd
+          : entryType === 'expense'
+          ? -amountDzd
+          : 0;
+
+      const [created] = await db
+        .insert(accountingEntries)
+        .values({
+          reference: String(b.reference || `CPT-${Date.now().toString(36).slice(-5).toUpperCase()}`).trim(),
+          entryType,
+          category: String(b.category || 'Journal Comptable').trim(),
+          label,
+          partnerName: String(b.partnerName || '').trim(),
+          amountDzd,
+          costDzd,
+          marginDzd,
+          paymentMethod: String(b.paymentMethod || 'Espèces / Caisse').trim(),
+          sourceFile: b.sourceFile ? String(b.sourceFile) : 'Saisie manuelle admin',
+          notes: String(b.notes || '').trim(),
+          entryDate: b.entryDate ? new Date(b.entryDate) : new Date(),
+        })
+        .returning();
+
+      return res.status(201).json({ entry: created });
+    } catch (error) {
+      console.error('Create accounting entry error:', error);
+      return res.status(500).json({ error: 'Impossible d’enregistrer l’écriture comptable.' });
+    }
+  });
+
+  app.delete('/api/admin/accounting/:id', requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      await db.delete(accountingEntries).where(eq(accountingEntries.id, id));
+      return res.json({ deleted: true });
+    } catch (error) {
+      return res.status(500).json({ error: 'Erreur lors de la suppression de l’écriture comptable.' });
     }
   });
 
@@ -1870,6 +1932,11 @@ export function createApp() {
         .select()
         .from(importMappingProfiles)
         .orderBy(desc(importMappingProfiles.updatedAt));
+      const accounting = await db
+        .select()
+        .from(accountingEntries)
+        .orderBy(desc(accountingEntries.entryDate), desc(accountingEntries.id))
+        .limit(200);
 
       return res.json({
         globalLowStockThreshold: globalThreshold,
@@ -1878,6 +1945,7 @@ export function createApp() {
         alerts,
         imports,
         profiles,
+        accountingEntries: accounting,
       });
     } catch (error) {
       console.error('Admin stock error:', error);
@@ -2040,12 +2108,16 @@ export function createApp() {
     }
   });
 
-  // Preview universal stock database file (Excel, CSV, TSV, JSON, XML, SQLite, SQL)
-  app.post('/api/admin/stock/import/preview', requireAdmin, upload.single('file'), async (req, res) => {
+  // Preview universal stock & accounting database files (.MDF + .IDF, DBF, BAK, Excel, CSV, TSV, JSON, XML, SQLite, SQL)
+  app.post('/api/admin/stock/import/preview', requireAdmin, upload.any(), async (req, res) => {
     try {
-      const file = req.file;
-      if (!file) {
-        return res.status(400).json({ error: 'Veuillez sélectionner un fichier de base de stock.' });
+      const uploadedFiles = Array.isArray(req.files)
+        ? (req.files as Express.Multer.File[])
+        : req.file
+        ? [req.file]
+        : [];
+      if (uploadedFiles.length === 0) {
+        return res.status(400).json({ error: 'Veuillez sélectionner votre fichier (ou vos deux fichiers .mdf et .idf).' });
       }
       const preferredTable = req.body.tableName ? String(req.body.tableName) : undefined;
       const syncMode = (req.body.syncMode || 'add_only') as StockSyncMode;
@@ -2053,7 +2125,10 @@ export function createApp() {
         ? JSON.parse(String(req.body.mappingJson))
         : null;
 
-      const parsed = await parseStockDatabaseBuffer(file.buffer, file.originalname, preferredTable);
+      const parsed = await parseStockDatabaseFiles(
+        uploadedFiles.map((f) => ({ buffer: f.buffer, originalname: f.originalname })),
+        preferredTable,
+      );
       const selectedTableObj =
         parsed.tables.find((t) => t.tableName === parsed.selectedTable) || parsed.tables[0];
       const activeMapping = customMapping?.name ? customMapping : parsed.suggestedMapping;
@@ -2073,8 +2148,44 @@ export function createApp() {
 
       const diff = buildDifferentialSyncPlan(selectedTableObj.rows, activeMapping, existing, syncMode);
 
+      const combinedFileName = uploadedFiles.map((f) => f.originalname).join(' + ');
+      const accountingEntriesPreview = extractAccountingEntriesFromTables(
+        parsed.tables,
+        selectedTableObj.rows,
+        activeMapping,
+        combinedFileName,
+      );
+
+      const accountingTotals = accountingEntriesPreview.reduce(
+        (acc, e) => {
+          if (e.entryType === 'sale') {
+            acc.salesDzd += e.amountDzd;
+            acc.salesMarginDzd += e.marginDzd;
+          } else if (e.entryType === 'purchase') {
+            acc.purchasesDzd += e.amountDzd;
+          } else if (e.entryType === 'expense') {
+            acc.expensesDzd += e.amountDzd;
+          } else if (e.entryType === 'stock_valuation') {
+            acc.stockSaleValueDzd += e.amountDzd;
+            acc.stockCostValueDzd += e.costDzd;
+            acc.stockMarginDzd += e.marginDzd;
+          }
+          return acc;
+        },
+        {
+          salesDzd: 0,
+          salesMarginDzd: 0,
+          purchasesDzd: 0,
+          expensesDzd: 0,
+          stockSaleValueDzd: 0,
+          stockCostValueDzd: 0,
+          stockMarginDzd: 0,
+        },
+      );
+
       return res.json({
-        fileName: file.originalname,
+        fileName: combinedFileName,
+        companionFiles: parsed.companionFiles,
         format: parsed.format,
         tables: parsed.tables.map((t) => ({ tableName: t.tableName, rowCount: t.rows.length })),
         selectedTable: parsed.selectedTable,
@@ -2082,6 +2193,11 @@ export function createApp() {
         totalRows: parsed.totalRows,
         previewRows: parsed.previewRows,
         mapping: activeMapping,
+        accountingPreview: {
+          totalEntries: accountingEntriesPreview.length,
+          ...accountingTotals,
+          sampleEntries: accountingEntriesPreview.slice(0, 12),
+        },
         diffSummary: {
           toAddCount: diff.toAdd.length,
           toUpdateCount: diff.toUpdate.length,
@@ -2106,12 +2222,16 @@ export function createApp() {
     }
   });
 
-  // Commit universal stock database import with differential sync
-  app.post('/api/admin/stock/import/commit', requireAdmin, upload.single('file'), async (req: AuthRequest, res) => {
+  // Commit universal stock & accounting database import (.MDF + .IDF, etc.) with differential sync
+  app.post('/api/admin/stock/import/commit', requireAdmin, upload.any(), async (req: AuthRequest, res) => {
     try {
-      const file = req.file;
-      if (!file) {
-        return res.status(400).json({ error: 'Fichier manquant.' });
+      const uploadedFiles = Array.isArray(req.files)
+        ? (req.files as Express.Multer.File[])
+        : req.file
+        ? [req.file]
+        : [];
+      if (uploadedFiles.length === 0) {
+        return res.status(400).json({ error: 'Fichier(s) de sauvegarde manquant(s).' });
       }
       const preferredTable = req.body.tableName ? String(req.body.tableName) : undefined;
       const syncMode = (req.body.syncMode || 'add_only') as StockSyncMode;
@@ -2120,8 +2240,12 @@ export function createApp() {
         : { name: '' };
       const defaultCategoryId = req.body.defaultCategoryId ? Number(req.body.defaultCategoryId) : null;
       const saveProfileName = req.body.saveProfileName ? String(req.body.saveProfileName).trim() : '';
+      const generateAccounting = req.body.generateAccounting !== 'false';
 
-      const parsed = await parseStockDatabaseBuffer(file.buffer, file.originalname, preferredTable);
+      const parsed = await parseStockDatabaseFiles(
+        uploadedFiles.map((f) => ({ buffer: f.buffer, originalname: f.originalname })),
+        preferredTable,
+      );
       const selectedTableObj =
         parsed.tables.find((t) => t.tableName === parsed.selectedTable) || parsed.tables[0];
       const activeMapping = mapping.name ? mapping : parsed.suggestedMapping;
@@ -2144,10 +2268,12 @@ export function createApp() {
       const allCats = await db.select().from(categories);
       const catByNormName = new Map(allCats.map((c) => [slugify(c.name), c.id]));
 
+      const combinedFileName = uploadedFiles.map((f) => f.originalname).join(' + ');
+
       const [importRecord] = await db
         .insert(stockImports)
         .values({
-          fileName: file.originalname,
+          fileName: combinedFileName,
           fileFormat: parsed.format,
           sourceTableOrSheet: parsed.selectedTable,
           syncMode,
@@ -2224,7 +2350,7 @@ export function createApp() {
             delta: item.stockQuantity,
             previousQty: 0,
             newQty: item.stockQuantity,
-            reason: `Import logiciel (${file.originalname})`,
+            reason: `Import logiciel (${combinedFileName})`,
             createdBy: req.adminUser?.email || 'admin',
           });
           await evaluateProductLowStock(inserted.id);
@@ -2251,7 +2377,7 @@ export function createApp() {
             delta: entry.stockDelta,
             previousQty: entry.existing.stockQuantity,
             newQty: entry.incoming.stockQuantity,
-            reason: `Synchro fichier stock (${file.originalname})`,
+            reason: `Synchro fichier stock (${combinedFileName})`,
             createdBy: req.adminUser?.email || 'admin',
           });
         }
@@ -2259,7 +2385,36 @@ export function createApp() {
         updatedCount += 1;
       }
 
-      // 3. Save mapping profile if requested
+      // 3. Generate & store Complete Accounting ("Toute la Compta") in PostgreSQL
+      let accountingGeneratedCount = 0;
+      if (generateAccounting) {
+        const extractedAccounting = extractAccountingEntriesFromTables(
+          parsed.tables,
+          selectedTableObj.rows,
+          activeMapping,
+          combinedFileName,
+        );
+        for (const acc of extractedAccounting) {
+          await db.insert(accountingEntries).values({
+            reference: `${acc.reference}-${importRecord.id}`,
+            entryType: acc.entryType,
+            category: acc.category,
+            label: acc.label,
+            partnerName: acc.partnerName,
+            amountDzd: acc.amountDzd,
+            costDzd: acc.costDzd,
+            marginDzd: acc.marginDzd,
+            paymentMethod: acc.paymentMethod,
+            sourceFile: combinedFileName,
+            importId: importRecord.id,
+            entryDate: acc.entryDate ? new Date(acc.entryDate) : new Date(),
+            notes: acc.notes,
+          });
+          accountingGeneratedCount += 1;
+        }
+      }
+
+      // 4. Save mapping profile if requested
       if (saveProfileName) {
         await db
           .insert(importMappingProfiles)
@@ -2288,7 +2443,7 @@ export function createApp() {
         .set({
           addedCount,
           updatedCount,
-          summaryJson: JSON.stringify({ addedProductIds }),
+          summaryJson: JSON.stringify({ addedProductIds, accountingGeneratedCount }),
         })
         .where(eq(stockImports.id, importRecord.id))
         .returning();
@@ -2296,10 +2451,11 @@ export function createApp() {
       return res.status(201).json({
         importRecord: finalImport,
         addedProductIds,
+        accountingGeneratedCount,
       });
     } catch (error: any) {
       console.error('Import commit error:', error);
-      return res.status(500).json({ error: error?.message || 'Erreur lors de l’importation du stock.' });
+      return res.status(500).json({ error: error?.message || 'Erreur lors de l’importation du stock et de la comptabilité.' });
     }
   });
 

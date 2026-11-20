@@ -80,7 +80,7 @@ export function AdminShell({
 
   // Contextual sub-navigation flags
   const [productsOnlyMissingPhotos, setProductsOnlyMissingPhotos] = useState(false);
-  const [stockInitialSubTab, setStockInitialSubTab] = useState<'import' | 'levels' | 'alerts'>('levels');
+  const [stockInitialSubTab, setStockInitialSubTab] = useState<'import' | 'levels' | 'compta' | 'alerts'>('levels');
 
   // Admin datasets loaded from real PostgreSQL APIs
   const [loadingData, setLoadingData] = useState(false);
@@ -493,7 +493,9 @@ export function AdminShell({
             <AdminSales
               sales={sales}
               orders={orders}
+              accountingEntries={stockData?.accountingEntries || []}
               storeSettings={settingsData?.settings || publicSettings}
+              onOpenMdfImport={() => handleNavigateTab('stock', { subTab: 'import' })}
             />
           )}
           {activeTab === 'products' && (

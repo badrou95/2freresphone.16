@@ -241,6 +241,25 @@ export const stockImports = pgTable('stock_imports', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+export const accountingEntries = pgTable('accounting_entries', {
+  id: serial('id').primaryKey(),
+  reference: text('reference').notNull(),
+  entryType: text('entry_type').notNull().default('sale'), // 'sale' | 'purchase' | 'stock_valuation' | 'expense' | 'adjustment'
+  category: text('category').notNull().default('Ventes & Caisse'),
+  label: text('label').notNull(),
+  partnerName: text('partner_name').notNull().default(''),
+  amountDzd: integer('amount_dzd').notNull().default(0),
+  costDzd: integer('cost_dzd').notNull().default(0),
+  marginDzd: integer('margin_dzd').notNull().default(0),
+  paymentMethod: text('payment_method').notNull().default('Espèces / Caisse'),
+  sourceFile: text('source_file'),
+  importId: integer('import_id').references(() => stockImports.id, { onDelete: 'set null' }),
+  orderId: integer('order_id').references(() => orders.id, { onDelete: 'set null' }),
+  entryDate: timestamp('entry_date').defaultNow().notNull(),
+  notes: text('notes').notNull().default(''),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const importMappingProfiles = pgTable('import_mapping_profiles', {
   id: serial('id').primaryKey(),
   profileName: text('profile_name').notNull().unique(),
