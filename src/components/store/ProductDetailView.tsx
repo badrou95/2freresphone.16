@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, CheckCircle2, MessageCircle, Minus, Plus, ShieldCheck, ShoppingBag, Truck } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, MessageCircle, Minus, Palette, Plus, ShieldCheck, ShoppingBag, Truck } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
-import { PublicReview, StoreProduct, StoreSettings } from '../../types';
+import { ProductColorOption, PublicReview, StoreProduct, StoreSettings } from '../../types';
 import { buildWhatsAppOrderUrl, formatDzd } from '../../shared/domain';
 import { ProductImage } from '../ProductImage';
 import { StarInput, StarRating } from '../StarRating';
@@ -10,7 +10,7 @@ interface ProductDetailViewProps {
   slug: string;
   settings: StoreSettings;
   onBack: () => void;
-  onAddToCart: (product: StoreProduct, qty: number) => void;
+  onAddToCart: (product: StoreProduct, qty: number, selectedColor?: string) => void;
   onGoCheckout: () => void;
 }
 
@@ -27,6 +27,7 @@ export function ProductDetailView({
   const [error, setError] = useState<string | null>(null);
   const [activeImageIdx, setActiveImageIdx] = useState(0);
   const [quantity, setQuantity] = useState(1);
+  const [selectedColor, setSelectedColor] = useState<string>('');
 
   // Review submission state
   const [orderRef, setOrderRef] = useState('');
@@ -48,6 +49,7 @@ export function ProductDetailView({
         setReviews(data.reviews || []);
         setActiveImageIdx(0);
         setQuantity(1);
+        setSelectedColor(data.product.colors?.[0]?.name || '');
       })
       .catch((err) => {
         if (!active) return;
@@ -123,10 +125,19 @@ export function ProductDetailView({
   }
 
   const gallery = product.images && product.images.length > 0 ? product.images : [];
-  const mainImageUrl = gallery[activeImageIdx]?.url || product.primaryImage || null;
+  const availableColors: ProductColorOption[] = Array.isArray(product.colors)
+    ? product.colors.filter((c) => c && c.name)
+    : [];
+  const selectedColorObj = availableColors.find((c) => c.name === selectedColor);
+  const mainImageUrl =
+    selectedColorObj?.imageUrl || gallery[activeImageIdx]?.url || product.primaryImage || null;
   const outOfStock =
     (product.productType === 'physical' && product.stockQuantity <= 0) ||
     (product.productType === 'digital' && product.digitalAvailability === 'paused');
+
+  const productWithColorTitle = selectedColor
+    ? `${product.name} (Couleur : ${selectedColor})`
+    : product.name;
 
   const whatsappDirectUrl = buildWhatsAppOrderUrl(settings.whatsappPhone, {
     storeName: settings.storeName,
@@ -137,7 +148,7 @@ export function ProductDetailView({
     commune: 'À préciser',
     address: 'À préciser',
     deliveryType: product.productType === 'digital' ? 'digital' : 'home',
-    items: [{ name: product.name, quantity, unitPriceDzd: product.priceDzd }],
+    items: [{ name: productWithColorTitle, quantity, unitPriceDzd: product.priceDzd }],
     subtotalDzd: product.priceDzd * quantity,
     discountDzd: 0,
     shippingFeeDzd: 0,
@@ -238,6 +249,46 @@ export function ProductDetailView({
               )}
             </div>
 
+            {/* Available Colors Selector */}
+            {availableColors.length > 0 && (
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
+                  <Palette className="w-4 h-4 text-blue-700" />
+                  <span>Couleur disponible :</span>
+                  <span className="text-blue-700">{selectedColor}</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {availableColors.map((c) => {
+                    const active = selectedColor === c.name;
+                    return (
+                      <button
+                        key={c.name}
+                        type="button"
+                        onClick={() => {
+                          setSelectedColor(c.name);
+                          if (c.imageUrl) {
+                            const matchIdx = gallery.findIndex((g) => g.url === c.imageUrl);
+                            if (matchIdx >= 0) setActiveImageIdx(matchIdx);
+                          }
+                        }}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                          active
+                            ? 'border-blue-700 bg-blue-600 text-white shadow-sm'
+                            : 'border-slate-300 bg-white text-slate-700 hover:border-slate-400'
+                        }`}
+                      >
+                        <span
+                          className="w-3.5 h-3.5 rounded-full border border-white/60 shrink-0"
+                          style={{ backgroundColor: c.hex || '#0f172a' }}
+                        />
+                        <span>{c.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {product.shortDescription && (
               <p className="text-sm text-slate-600 leading-relaxed">{product.shortDescription}</p>
             )}
@@ -272,7 +323,7 @@ export function ProductDetailView({
                 <button
                   type="button"
                   disabled={outOfStock}
-                  onClick={() => onAddToCart(product, quantity)}
+                  onClick={() => onAddToCart(product, quantity, selectedColor || undefined)}
                   className="flex-1 inline-flex items-center justify-center gap-2 py-3 px-5 rounded-lg bg-blue-700 hover:bg-blue-800 disabled:bg-slate-200 disabled:text-slate-400 text-white text-sm font-semibold transition-colors"
                 >
                   <ShoppingBag className="w-4 h-4" />
@@ -285,7 +336,7 @@ export function ProductDetailView({
                   type="button"
                   disabled={outOfStock}
                   onClick={() => {
-                    onAddToCart(product, quantity);
+                    onAddToCart(product, quantity, selectedColor || undefined);
                     onGoCheckout();
                   }}
                   className="w-full py-2.5 px-4 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:bg-slate-200 disabled:text-slate-400 text-white text-sm font-semibold transition-colors"

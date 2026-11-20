@@ -175,7 +175,7 @@ function StorefrontApp() {
                 slug={route.slug}
                 settings={settings}
                 onBack={() => navigate('/catalogue')}
-                onAddToCart={(p, qty) => addItem(p, qty)}
+                onAddToCart={(p, qty, color) => addItem(p, qty, color)}
                 onGoCheckout={() => navigate('/commande')}
               />
             )}

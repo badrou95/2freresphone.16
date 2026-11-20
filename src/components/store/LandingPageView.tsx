@@ -3,7 +3,9 @@ import {
   ArrowLeft,
   CheckCircle2,
   HelpCircle,
+  Images,
   MessageCircle,
+  Palette,
   ShieldCheck,
   ShoppingBag,
   Sparkles,
@@ -17,7 +19,7 @@ import {
   formatDzd,
   isValidAlgerianPhone,
 } from '../../shared/domain';
-import { StoreBootstrap } from '../../types';
+import { ProductColorOption, StoreBootstrap } from '../../types';
 import { ProductImage } from '../ProductImage';
 
 interface LandingPageViewProps {
@@ -46,6 +48,7 @@ export function LandingPageView({
   const [address, setAddress] = useState('');
   const [deliveryType, setDeliveryType] = useState<'home' | 'stop_desk'>('home');
   const [quantity, setQuantity] = useState(1);
+  const [selectedColor, setSelectedColor] = useState<string>('');
   const [customerNotes, setCustomerNotes] = useState('');
 
   const [submitting, setSubmitting] = useState(false);
@@ -53,11 +56,17 @@ export function LandingPageView({
   const [createdOrder, setCreatedOrder] = useState<any | null>(null);
   const [selectedImage, setSelectedImage] = useState<string>('');
 
+  const availableColors: ProductColorOption[] = useMemo(() => {
+    if (!page || !Array.isArray(page.colors)) return [];
+    return page.colors.filter((c: any) => c && typeof c.name === 'string' && c.name.trim());
+  }, [page]);
+
   const galleryList = useMemo(() => {
     if (!page) return [];
     const raw = Array.isArray(page.galleryImages) ? page.galleryImages : [];
-    return Array.from(new Set([page.heroImageUrl, ...raw].filter(Boolean)));
-  }, [page]);
+    const colorImgs = availableColors.map((c) => c.imageUrl).filter(Boolean);
+    return Array.from(new Set([page.heroImageUrl, ...raw, ...colorImgs].filter(Boolean)));
+  }, [page, availableColors]);
 
   const activeImage = selectedImage || page?.heroImageUrl || galleryList[0] || '';
 
@@ -66,10 +75,16 @@ export function LandingPageView({
     setLoading(true);
     setError(null);
     setSelectedImage('');
+    setSelectedColor('');
     apiFetch<{ landingPage: any }>(`/api/landing-pages/${encodeURIComponent(slug)}`)
       .then((res) => {
         if (!active) return;
         setPage(res.landingPage);
+        const firstColor =
+          Array.isArray(res.landingPage?.colors) && res.landingPage.colors.length > 0
+            ? res.landingPage.colors[0].name
+            : '';
+        setSelectedColor(firstColor);
       })
       .catch((err) => {
         if (!active) return;
@@ -82,6 +97,13 @@ export function LandingPageView({
       active = false;
     };
   }, [slug]);
+
+  const handleSelectColor = (color: ProductColorOption) => {
+    setSelectedColor(color.name);
+    if (color.imageUrl) {
+      setSelectedImage(color.imageUrl);
+    }
+  };
 
   const currentRate = useMemo(() => {
     const rates = (bootstrap.shippingRates || []).filter(
@@ -122,7 +144,9 @@ export function LandingPageView({
         address: address.trim() || commune.trim(),
         deliveryType,
         carrierId: currentRate?.carrierId,
-        customerNotes: customerNotes.trim() || `Commande via Landing Page : ${page.title}`,
+        customerNotes:
+          customerNotes.trim() ||
+          `Commande via Landing Page : ${page.title}${selectedColor ? ` (Couleur : ${selectedColor})` : ''}`,
         landingPageId: page.id,
         items: [
           {
@@ -131,6 +155,7 @@ export function LandingPageView({
             customPriceDzd: unitPriceDzd,
             customSku: `LP-${page.id}`,
             quantity,
+            selectedColor: selectedColor || undefined,
           },
         ],
       };
@@ -175,6 +200,10 @@ export function LandingPageView({
     );
   }
 
+  const displayProductNameWithColor = selectedColor
+    ? `${page.productName} (Couleur : ${selectedColor})`
+    : page.productName;
+
   if (createdOrder) {
     const whatsappUrl = buildWhatsAppOrderUrl(bootstrap.settings.whatsappPhone, {
       storeName: bootstrap.settings.storeName,
@@ -186,7 +215,7 @@ export function LandingPageView({
       commune: createdOrder.commune,
       address: createdOrder.address,
       deliveryType: createdOrder.deliveryType,
-      items: [{ name: page.productName, quantity, unitPriceDzd }],
+      items: [{ name: displayProductNameWithColor, quantity, unitPriceDzd }],
       subtotalDzd: createdOrder.subtotalDzd,
       discountDzd: createdOrder.discountDzd,
       shippingFeeDzd: createdOrder.shippingFeeDzd,
@@ -218,7 +247,7 @@ export function LandingPageView({
             <div className="flex justify-between">
               <span className="text-slate-500">Offre commandée :</span>
               <span className="font-semibold text-slate-900">
-                {page.productName} × {quantity}
+                {displayProductNameWithColor} × {quantity}
               </span>
             </div>
             <div className="flex justify-between">
@@ -267,6 +296,8 @@ export function LandingPageView({
       ? Math.round(((page.compareAtPriceDzd - page.priceDzd) / page.compareAtPriceDzd) * 100)
       : null;
 
+  const benefitsList = Array.isArray(page.benefits) ? page.benefits : [];
+
   return (
     <div className="bg-slate-50 pb-16">
       {/* Top Urgency Bar */}
@@ -303,7 +334,13 @@ export function LandingPageView({
                     -{discountPercent}% PROMO
                   </span>
                 )}
+                {galleryList.length > 1 && (
+                  <span className="absolute bottom-3 right-3 px-2.5 py-1 rounded-lg bg-slate-900/80 text-white text-[11px] font-semibold backdrop-blur-sm">
+                    {galleryList.indexOf(activeImage) + 1 || 1} / {galleryList.length} photos
+                  </span>
+                )}
               </div>
+
               {galleryList.length > 1 && (
                 <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center gap-2.5 overflow-x-auto">
                   {galleryList.map((imgUrl: string, idx: number) => (
@@ -322,6 +359,43 @@ export function LandingPageView({
                   ))}
                 </div>
               )}
+
+              {/* Available Colors Bar inside Hero Card */}
+              {availableColors.length > 0 && (
+                <div className="px-5 py-3.5 bg-white border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
+                    <Palette className="w-4 h-4 text-blue-700" />
+                    <span>Couleurs disponibles :</span>
+                    {selectedColor && (
+                      <span className="text-blue-700 font-semibold">{selectedColor}</span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {availableColors.map((c) => {
+                      const active = selectedColor === c.name;
+                      return (
+                        <button
+                          key={c.name}
+                          type="button"
+                          onClick={() => handleSelectColor(c)}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all ${
+                            active
+                              ? 'border-blue-700 bg-blue-50 text-blue-950 ring-2 ring-blue-600/15'
+                              : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                          }`}
+                        >
+                          <span
+                            className="w-3.5 h-3.5 rounded-full border border-slate-300 shrink-0"
+                            style={{ backgroundColor: c.hex || '#0f172a' }}
+                          />
+                          <span>{c.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <div className="p-5 flex flex-wrap items-center justify-between gap-4 bg-slate-900 text-white">
                 <div>
                   <p className="text-xs text-slate-400">Prix de l’offre spéciale</p>
@@ -350,9 +424,9 @@ export function LandingPageView({
             </div>
 
             {/* Key Benefits */}
-            {Array.isArray(page.benefits) && page.benefits.length > 0 && (
+            {benefitsList.length > 0 && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {page.benefits.map((b: any, idx: number) => (
+                {benefitsList.map((b: any, idx: number) => (
                   <div
                     key={idx}
                     className="bg-white border border-slate-200 rounded-xl p-4 flex items-start gap-3"
@@ -372,6 +446,7 @@ export function LandingPageView({
           <div className="lg:col-span-5 lg:sticky lg:top-20">
             <form
               onSubmit={handleSubmitOrder}
+              id="order-form-cod"
               className="bg-white border-2 border-blue-700 rounded-2xl p-5 sm:p-6 space-y-4 shadow-lg"
             >
               <div className="border-b border-slate-100 pb-3">
@@ -386,6 +461,39 @@ export function LandingPageView({
               {orderError && (
                 <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700">
                   {orderError}
+                </div>
+              )}
+
+              {/* Color selector directly inside the COD Order Form */}
+              {availableColors.length > 0 && (
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                  <label className="block text-xs font-bold text-slate-800">
+                    Choisissez votre couleur * :{' '}
+                    <span className="text-blue-700">{selectedColor}</span>
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {availableColors.map((c) => {
+                      const active = selectedColor === c.name;
+                      return (
+                        <button
+                          key={c.name}
+                          type="button"
+                          onClick={() => handleSelectColor(c)}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                            active
+                              ? 'border-blue-700 bg-blue-600 text-white shadow-sm'
+                              : 'border-slate-300 bg-white text-slate-700 hover:border-slate-400'
+                          }`}
+                        >
+                          <span
+                            className="w-3.5 h-3.5 rounded-full border border-white/60 shrink-0"
+                            style={{ backgroundColor: c.hex || '#0f172a' }}
+                          />
+                          <span>{c.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 
@@ -529,7 +637,7 @@ export function LandingPageView({
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-1.5 text-xs">
                 <div className="flex justify-between text-slate-600">
                   <span>
-                    {page.productName} × {quantity}
+                    {displayProductNameWithColor} × {quantity}
                   </span>
                   <span className="font-mono font-semibold text-slate-900">
                     {formatDzd(subtotalDzd)}
@@ -566,6 +674,71 @@ export function LandingPageView({
           </div>
         </div>
 
+        {/* Full Multi-Image Visual Showcase Section (when multiple images exist) */}
+        {galleryList.length > 1 && (
+          <section className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 space-y-6 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+              <div>
+                <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-blue-700">
+                  <Images className="w-4 h-4" />
+                  <span>Présentation Visuelle Complète ({galleryList.length} visuels)</span>
+                </span>
+                <h2 className="font-display font-bold text-xl sm:text-2xl text-slate-900 mt-0.5">
+                  Découvrez {page.productName} sous tous les angles
+                </h2>
+              </div>
+              <a
+                href="#order-form-cod"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-white text-xs font-semibold shadow-sm"
+                style={{ backgroundColor: page.accentColor || '#1d4ed8' }}
+              >
+                <ShoppingBag className="w-3.5 h-3.5" />
+                <span>Commander ({formatDzd(page.priceDzd)})</span>
+              </a>
+            </div>
+
+            {/* Alternating Feature + Studio Photo Blocks */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {galleryList.map((imgUrl: string, idx: number) => {
+                const pairedBenefit = benefitsList[idx % Math.max(1, benefitsList.length)];
+                return (
+                  <div
+                    key={`showcase-${idx}`}
+                    onClick={() => {
+                      setSelectedImage(imgUrl);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="group cursor-pointer rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 hover:border-blue-400 transition-all flex flex-col"
+                  >
+                    <div className="aspect-[4/3] w-full bg-white relative overflow-hidden">
+                      <ProductImage
+                        src={imgUrl}
+                        alt={`${page.productName} - Vue ${idx + 1}`}
+                      />
+                      <span className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-slate-900/75 text-white text-[11px] font-bold">
+                        Vue Studio #{idx + 1}
+                      </span>
+                    </div>
+                    {pairedBenefit && (
+                      <div className="p-4 bg-white border-t border-slate-100 flex items-start gap-3">
+                        <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="font-display font-bold text-sm text-slate-900">
+                            {pairedBenefit.title}
+                          </h3>
+                          <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                            {pairedBenefit.description}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
         {/* Specifications & Customer Testimonials */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
           {Array.isArray(page.specs) && page.specs.length > 0 && (
@@ -574,6 +747,14 @@ export function LandingPageView({
                 Caractéristiques de l’offre
               </h3>
               <dl className="divide-y divide-slate-100 text-xs">
+                {availableColors.length > 0 && (
+                  <div className="py-2.5 flex justify-between gap-4">
+                    <dt className="text-slate-500 font-medium">Couleurs disponibles</dt>
+                    <dd className="text-slate-900 font-semibold text-right">
+                      {availableColors.map((c) => c.name).join(', ')}
+                    </dd>
+                  </div>
+                )}
                 {page.specs.map((s: any, idx: number) => (
                   <div key={idx} className="py-2.5 flex justify-between gap-4">
                     <dt className="text-slate-500 font-medium">{s.label}</dt>

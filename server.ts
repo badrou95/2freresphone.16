@@ -231,6 +231,14 @@ export function createApp() {
           categoryGroup: cat?.categoryGroup || 'accessories',
           primaryImage: imgs[0]?.url || null,
           images: imgs.map((i) => ({ id: i.id, url: i.url, altText: i.altText, isPrimary: i.isPrimary })),
+          colors: (() => {
+            try {
+              const parsed = JSON.parse(p.colorsJson || '[]');
+              return Array.isArray(parsed) ? parsed : [];
+            } catch {
+              return [];
+            }
+          })(),
           averageRating: reviewStats.averageRating,
           reviewCount: reviewStats.reviewCount,
         };
@@ -338,6 +346,14 @@ export function createApp() {
           categorySlug: cat?.slug || '',
           categoryGroup: cat?.categoryGroup || 'accessories',
           images: imgs,
+          colors: (() => {
+            try {
+              const parsed = JSON.parse(product.colorsJson || '[]');
+              return Array.isArray(parsed) ? parsed : [];
+            } catch {
+              return [];
+            }
+          })(),
           averageRating: reviewSummary.averageRating,
           reviewCount: reviewSummary.reviewCount,
           ratingDistribution: reviewSummary.distribution,
@@ -671,9 +687,10 @@ export function createApp() {
           subtotalDzd += lineTotalDzd;
           if (prod.productType === 'digital') hasDigital = true;
           else hasPhysical = true;
+          const colorLabel = line.selectedColor ? ` — Couleur : ${String(line.selectedColor).trim()}` : '';
           resolvedItems.push({
             productId: prod.id,
-            productName: prod.name,
+            productName: `${prod.name}${colorLabel}`,
             productSku: prod.sku,
             productType: prod.productType,
             unitPriceDzd: unitPrice,
@@ -687,9 +704,10 @@ export function createApp() {
           const lineTotalDzd = unitPrice * qty;
           subtotalDzd += lineTotalDzd;
           hasPhysical = true;
+          const colorLabel = line.selectedColor ? ` — Couleur : ${String(line.selectedColor).trim()}` : '';
           resolvedItems.push({
             productId: null,
-            productName: String(line.customName).trim(),
+            productName: `${String(line.customName).trim()}${colorLabel}`,
             productSku: String(line.customSku || 'LP-OFFER').trim(),
             productType: 'physical',
             unitPriceDzd: unitPrice,
@@ -1498,8 +1516,16 @@ export function createApp() {
         const imgs = imgMap.get(p.id) || [];
         const cat = p.categoryId ? catMap.get(p.categoryId) : null;
         const effectiveThreshold = computeEffectiveLowStockThreshold(p.lowStockThreshold, globalThreshold);
+        let parsedColors: any[] = [];
+        try {
+          const c = JSON.parse(p.colorsJson || '[]');
+          if (Array.isArray(c)) parsedColors = c;
+        } catch {
+          parsedColors = [];
+        }
         return {
           ...p,
+          colors: parsedColors,
           categoryName: cat?.name || 'Non classé',
           categoryGroup: cat?.categoryGroup || 'accessories',
           images: imgs,
@@ -1553,16 +1579,23 @@ export function createApp() {
           isActive: b.isActive !== false,
           digitalAvailability: b.productType === 'digital' ? b.digitalAvailability || 'available' : null,
           digitalActivationTemplate: b.digitalActivationTemplate || null,
+          colorsJson: JSON.stringify(Array.isArray(b.colors) ? b.colors : []),
         })
         .returning();
 
-      if (b.imageUrl && String(b.imageUrl).trim()) {
+      const incomingImages: string[] = Array.isArray(b.imageUrls)
+        ? b.imageUrls.map((u: any) => String(u || '').trim()).filter(Boolean)
+        : b.imageUrl && String(b.imageUrl).trim()
+        ? [String(b.imageUrl).trim()]
+        : [];
+
+      for (let i = 0; i < incomingImages.length; i++) {
         await db.insert(productImages).values({
           productId: created.id,
-          url: String(b.imageUrl).trim(),
+          url: incomingImages[i],
           altText: created.name,
-          sortOrder: 0,
-          isPrimary: true,
+          sortOrder: i,
+          isPrimary: i === 0,
         });
       }
 
@@ -1621,6 +1654,8 @@ export function createApp() {
             b.digitalActivationTemplate !== undefined
               ? b.digitalActivationTemplate
               : existing.digitalActivationTemplate,
+          colorsJson:
+            b.colors !== undefined ? JSON.stringify(Array.isArray(b.colors) ? b.colors : []) : existing.colorsJson,
           updatedAt: new Date(),
         })
         .where(eq(products.id, id))
@@ -2947,6 +2982,7 @@ export function createApp() {
     return {
       ...row,
       galleryImages: parseJsonSafe<string[]>(row.galleryImagesJson, []),
+      colors: parseJsonSafe<{ name: string; hex: string; imageUrl?: string }[]>(row.colorsJson || '[]', []),
       benefits: parseJsonSafe<{ title: string; description: string }[]>(row.benefitsJson, []),
       specs: parseJsonSafe<{ label: string; value: string }[]>(row.specsJson, []),
       testimonials: parseJsonSafe<{ name: string; wilaya: string; rating: number; comment: string }[]>(
@@ -3172,6 +3208,12 @@ export function createApp() {
       const finalSlug =
         existingSlug.length > 0 ? `${baseSlug}-${Math.floor(100 + Math.random() * 900)}` : baseSlug;
 
+      const incomingColors = Array.isArray(b.colors) && b.colors.length > 0
+        ? b.colors
+        : Array.isArray(generatedData.colors)
+        ? generatedData.colors
+        : [];
+
       const [created] = await db
         .insert(landingPages)
         .values({
@@ -3188,6 +3230,7 @@ export function createApp() {
           urgencyText: String(generatedData.urgencyText || 'Stock limité · Expédition rapide 24/48h').trim(),
           heroImageUrl: rawImages[0] || null,
           galleryImagesJson: JSON.stringify(rawImages),
+          colorsJson: JSON.stringify(incomingColors),
           benefitsJson: JSON.stringify(Array.isArray(generatedData.benefits) ? generatedData.benefits : []),
           specsJson: JSON.stringify(Array.isArray(generatedData.specs) ? generatedData.specs : []),
           testimonialsJson: JSON.stringify(Array.isArray(generatedData.testimonials) ? generatedData.testimonials : []),
@@ -3198,7 +3241,7 @@ export function createApp() {
         .returning();
 
       return res.json({
-        generated: generatedData,
+        generated: { ...generatedData, colors: incomingColors },
         landingPage: serializeLandingPage(created),
         source,
         visionAnalyzedCount: imageParts.length,
@@ -3244,7 +3287,8 @@ Génère en français :
 9. "benefits" : 4 arguments de vente concrets basés sur les caractéristiques visuelles du produit + livraison Algérie.
 10. "specs" : 5 caractéristiques techniques pertinentes déduites du produit sur les photos.
 11. "testimonials" : 3 avis clients algériens réalistes (avec prénom, wilaya comme Alger, Oran, Constantine, Sétif, Béjaïa et note 5/5) parlant spécifiquement de ce produit.
-12. "faq" : 3 questions/réponses fréquentes adaptées à ce produit et à la livraison COD 58 wilayas.`;
+12. "faq" : 3 questions/réponses fréquentes adaptées à ce produit et à la livraison COD 58 wilayas.
+13. "colors" : Liste des couleurs visibles sur la ou les photos du produit (ex: [{"name": "Noir Intense", "hex": "#111827"}, {"name": "Blanc", "hex": "#F8FAFC"}]).`;
 
       const contentsPayload =
         imageParts.length > 0 ? [...imageParts, { text: promptText }] : promptText;
@@ -3265,6 +3309,16 @@ Génère en français :
               ctaText: { type: Type.STRING },
               urgencyText: { type: Type.STRING },
               accentColor: { type: Type.STRING },
+              colors: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    hex: { type: Type.STRING },
+                  },
+                },
+              },
               benefits: {
                 type: Type.ARRAY,
                 items: {
@@ -3330,6 +3384,12 @@ Génère en français :
         ctaText: parsed.ctaText || fallback.ctaText,
         urgencyText: parsed.urgencyText || fallback.urgencyText,
         accentColor: chosenColor,
+        colors:
+          Array.isArray(b.colors) && b.colors.length > 0
+            ? b.colors
+            : Array.isArray(parsed.colors) && parsed.colors.length > 0
+            ? parsed.colors
+            : [],
         benefits: Array.isArray(parsed.benefits) && parsed.benefits.length > 0 ? parsed.benefits : fallback.benefits,
         specs: Array.isArray(parsed.specs) && parsed.specs.length > 0 ? parsed.specs : fallback.specs,
         testimonials:
@@ -3343,6 +3403,123 @@ Génère en français :
     } catch (error) {
       console.warn('PagePilot Gemini fallback to template:', error);
       return await maybeAutoPublish(buildTemplateCopy(), 'template');
+    }
+  });
+
+  // Admin: Okwin AI Studio — Interpret custom background/scene prompt with Gemini (gemini-4-hydrogen)
+  app.post('/api/admin/okwin/scene-prompt', requireAdmin, async (req, res) => {
+    const b = req.body || {};
+    const customPrompt = String(b.prompt || '').trim();
+    const productName = String(b.productName || 'Produit 2Frères Phone').trim();
+
+    const defaultVariations = [
+      {
+        label: 'Studio Principal',
+        bgPrimary: '#0f172a',
+        bgSecondary: '#1e3a8a',
+        bgAccent: '#38bdf8',
+        podiumColor: '#1e293b',
+        glowColor: '#3b82f6',
+        lightAngle: 'top-left',
+        floorStyle: 'reflection',
+      },
+      {
+        label: 'Angle Lumineux Pur',
+        bgPrimary: '#f8fafc',
+        bgSecondary: '#e2e8f0',
+        bgAccent: '#2563eb',
+        podiumColor: '#ffffff',
+        glowColor: '#60a5fa',
+        lightAngle: 'center',
+        floorStyle: 'podium',
+      },
+      {
+        label: 'Contraste Luxe & Or',
+        bgPrimary: '#18181b',
+        bgSecondary: '#27272a',
+        bgAccent: '#f59e0b',
+        podiumColor: '#27272a',
+        glowColor: '#fbbf24',
+        lightAngle: 'top-right',
+        floorStyle: 'marble',
+      },
+      {
+        label: 'Ambiance Promo Dynamique',
+        bgPrimary: '#450a0a',
+        bgSecondary: '#991b1b',
+        bgAccent: '#f97316',
+        podiumColor: '#7f1d1d',
+        glowColor: '#ef4444',
+        lightAngle: 'center',
+        floorStyle: 'podium',
+      },
+    ];
+
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    if (!apiKey || !customPrompt) {
+      return res.json({ variations: defaultVariations, source: 'preset' });
+    }
+
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: `Tu es Okwin AI Studio, directeur artistique photo e-commerce pour "2Frères Phone".
+Le vendeur souhaite modifier l'arrière-plan et générer 4 variations studio de la photo du produit "${productName}" avec ce prompt personnalisé :
+"${customPrompt}"
+
+Génère 4 variations visuelles complémentaires (codes couleurs hexadécimaux #RRGGBB valides) qui correspondent fidèlement au prompt :
+- "label" : Nom court de la variation en français
+- "bgPrimary" : Couleur hex principale du fond
+- "bgSecondary" : Couleur hex secondaire du dégradé
+- "bgAccent" : Couleur hex du halo / néon / lumière d'accentuation
+- "podiumColor" : Couleur hex du podium ou surface sous le produit
+- "glowColor" : Couleur hex de la lueur derrière le produit
+- "lightAngle" : "top-left" | "center" | "top-right"
+- "floorStyle" : "podium" | "reflection" | "marble" | "neon-grid"`,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              variations: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    label: { type: Type.STRING },
+                    bgPrimary: { type: Type.STRING },
+                    bgSecondary: { type: Type.STRING },
+                    bgAccent: { type: Type.STRING },
+                    podiumColor: { type: Type.STRING },
+                    glowColor: { type: Type.STRING },
+                    lightAngle: { type: Type.STRING },
+                    floorStyle: { type: Type.STRING },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const variations =
+        Array.isArray(parsed.variations) && parsed.variations.length > 0
+          ? parsed.variations
+          : defaultVariations;
+      return res.json({ variations, source: 'gemini' });
+    } catch (err) {
+      console.warn('Okwin Gemini prompt fallback:', err);
+      return res.json({ variations: defaultVariations, source: 'preset' });
     }
   });
 
@@ -3379,6 +3556,7 @@ Génère en français :
           urgencyText: String(b.urgencyText || 'Stock limité · Expédition rapide 24/48h').trim(),
           heroImageUrl: b.heroImageUrl ? String(b.heroImageUrl).trim() : null,
           galleryImagesJson: JSON.stringify(Array.isArray(b.galleryImages) ? b.galleryImages : []),
+          colorsJson: JSON.stringify(Array.isArray(b.colors) ? b.colors : []),
           benefitsJson: JSON.stringify(Array.isArray(b.benefits) ? b.benefits : []),
           specsJson: JSON.stringify(Array.isArray(b.specs) ? b.specs : []),
           testimonialsJson: JSON.stringify(Array.isArray(b.testimonials) ? b.testimonials : []),
@@ -3435,6 +3613,8 @@ Génère en français :
               : existing.heroImageUrl,
           galleryImagesJson:
             b.galleryImages !== undefined ? JSON.stringify(b.galleryImages) : existing.galleryImagesJson,
+          colorsJson:
+            b.colors !== undefined ? JSON.stringify(Array.isArray(b.colors) ? b.colors : []) : existing.colorsJson,
           benefitsJson: b.benefits !== undefined ? JSON.stringify(b.benefits) : existing.benefitsJson,
           specsJson: b.specs !== undefined ? JSON.stringify(b.specs) : existing.specsJson,
           testimonialsJson:

@@ -5,7 +5,7 @@ interface CartContextValue {
   items: CartItem[];
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
-  addItem: (product: StoreProduct, quantity?: number) => void;
+  addItem: (product: StoreProduct, quantity?: number, selectedColor?: string) => void;
   updateQuantity: (productId: number, quantity: number) => void;
   removeItem: (productId: number) => void;
   clearCart: () => void;
@@ -38,14 +38,20 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     }
   }, [items]);
 
-  const addItem = (product: StoreProduct, quantity = 1) => {
+  const addItem = (product: StoreProduct, quantity = 1, selectedColor?: string) => {
+    const chosenColor = selectedColor || product.colors?.[0]?.name || undefined;
     setItems((prev) => {
       const existing = prev.find((i) => i.productId === product.id);
       const maxStock = product.productType === 'digital' ? 99 : Math.max(1, product.stockQuantity);
       if (existing) {
         return prev.map((i) =>
           i.productId === product.id
-            ? { ...i, quantity: Math.min(maxStock, i.quantity + quantity), maxStock }
+            ? {
+                ...i,
+                quantity: Math.min(maxStock, i.quantity + quantity),
+                maxStock,
+                selectedColor: chosenColor || i.selectedColor,
+              }
             : i,
         );
       }
@@ -61,6 +67,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
           image: product.primaryImage || product.images?.[0]?.url || null,
           quantity: Math.min(maxStock, quantity),
           maxStock,
+          selectedColor: chosenColor,
         },
       ];
     });

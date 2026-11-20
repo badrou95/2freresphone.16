@@ -363,6 +363,7 @@ const DDL_STATEMENTS: string[] = [
     urgency_text text NOT NULL DEFAULT 'Stock limité · Expédition rapide 24/48h',
     hero_image_url text,
     gallery_images_json text NOT NULL DEFAULT '[]',
+    colors_json text NOT NULL DEFAULT '[]',
     benefits_json text NOT NULL DEFAULT '[]',
     specs_json text NOT NULL DEFAULT '[]',
     testimonials_json text NOT NULL DEFAULT '[]',
@@ -409,6 +410,32 @@ async function ensureTablesExist(): Promise<void> {
     }
   } catch (e) {
     console.warn('Skipping landing_pages DDL check:', e);
+  }
+
+  try {
+    const prodColCheck = await db.execute(
+      sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'colors_json'`,
+    );
+    if (!prodColCheck.rows || prodColCheck.rows.length === 0) {
+      await db.execute(
+        sql.raw(`ALTER TABLE products ADD COLUMN IF NOT EXISTS colors_json text NOT NULL DEFAULT '[]'`),
+      );
+    }
+  } catch (e) {
+    console.warn('Skipping products.colors_json DDL check:', e);
+  }
+
+  try {
+    const lpColCheck = await db.execute(
+      sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'landing_pages' AND column_name = 'colors_json'`,
+    );
+    if (!lpColCheck.rows || lpColCheck.rows.length === 0) {
+      await db.execute(
+        sql.raw(`ALTER TABLE landing_pages ADD COLUMN IF NOT EXISTS colors_json text NOT NULL DEFAULT '[]'`),
+      );
+    }
+  } catch (e) {
+    console.warn('Skipping landing_pages.colors_json DDL check:', e);
   }
 }
 

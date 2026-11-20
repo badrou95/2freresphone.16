@@ -32,6 +32,12 @@ export interface ProductImageItem {
   isPrimary: boolean;
 }
 
+export interface ProductColorOption {
+  name: string;
+  hex: string;
+  imageUrl?: string;
+}
+
 export interface StoreProduct {
   id: number;
   sku: string;
@@ -53,6 +59,7 @@ export interface StoreProduct {
   categoryGroup: string;
   primaryImage: string | null;
   images: ProductImageItem[];
+  colors?: ProductColorOption[];
   averageRating: number;
   reviewCount: number;
   ratingDistribution?: Record<1 | 2 | 3 | 4 | 5, number>;
@@ -117,6 +124,7 @@ export interface CartItem {
   image: string | null;
   quantity: number;
   maxStock: number;
+  selectedColor?: string;
 }
 
 export interface AdminUser {

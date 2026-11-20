@@ -8,6 +8,7 @@ import {
   Plus,
   Printer,
   Search,
+  Sparkles,
   Star,
   Trash2,
   Upload,
@@ -18,6 +19,7 @@ import { printProductThermalLabels } from '../../lib/printer';
 import { CATEGORY_GROUPS, formatDzd } from '../../shared/domain';
 import { StoreSettings } from '../../types';
 import { ProductImage } from '../ProductImage';
+import { OkwinImageStudio, ProductColorsEditor } from './OkwinImageStudio';
 
 interface AdminProductsProps {
   products: any[];
@@ -46,11 +48,14 @@ export function AdminProducts({
   const [editingProduct, setEditingProduct] = useState<any | null>(null);
   const [formState, setFormState] = useState<any>({});
   const [savingProduct, setSavingProduct] = useState(false);
+  const [showModalOkwin, setShowModalOkwin] = useState(false);
 
   // Quick Photo Gallery Modal for any product (ideal right after stock DB import!)
   const [photoModalProduct, setPhotoModalProduct] = useState<any | null>(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [photoUrlInput, setPhotoUrlInput] = useState('');
+  const [showPhotoModalOkwin, setShowPhotoModalOkwin] = useState(false);
+  const [selectedOkwinSourceUrl, setSelectedOkwinSourceUrl] = useState<string>('');
 
   // Category quick form (create & edit) + multi-select bulk delete
   const [editingCategoryId, setEditingCategoryId] = useState<number | null>(null);
@@ -159,11 +164,19 @@ export function AdminProducts({
       isActive: true,
       digitalAvailability: 'available',
       digitalActivationTemplate: '',
+      colors: [],
+      imageUrls: [],
     });
+    setShowModalOkwin(false);
   };
 
   const openEditModal = (p: any) => {
     setEditingProduct(p);
+    const existingImageUrls = Array.isArray(p.images)
+      ? p.images.map((i: any) => i.url).filter(Boolean)
+      : p.primaryImage
+      ? [p.primaryImage]
+      : [];
     setFormState({
       name: p.name,
       sku: p.sku,
@@ -182,7 +195,10 @@ export function AdminProducts({
       isActive: p.isActive,
       digitalAvailability: p.digitalAvailability || 'available',
       digitalActivationTemplate: p.digitalActivationTemplate || '',
+      colors: Array.isArray(p.colors) ? p.colors : [],
+      imageUrls: existingImageUrls,
     });
+    setShowModalOkwin(false);
   };
 
   const handleSaveProduct = async (e: React.FormEvent) => {
@@ -247,6 +263,68 @@ export function AdminProducts({
     } finally {
       setUploadingPhoto(false);
     }
+  };
+
+  // Upload photo inside Create/Edit product modal
+  const handleModalPhotoUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploadingPhoto(true);
+    setFeedbackError(null);
+    try {
+      const uploadedUrls: string[] = [];
+      for (const file of Array.from(files)) {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('kind', 'product');
+        if (editingProduct && !editingProduct.isNew && editingProduct.id) {
+          fd.append('productId', String(editingProduct.id));
+        }
+        const res = await adminFetch<{ url: string }>('/api/admin/media/upload', {
+          method: 'POST',
+          body: fd,
+        });
+        if (res.url) uploadedUrls.push(res.url);
+      }
+      setFormState((prev: any) => ({
+        ...prev,
+        imageUrls: Array.from(new Set([...(prev.imageUrls || []), ...uploadedUrls])),
+      }));
+      if (editingProduct && !editingProduct.isNew) {
+        onRefresh();
+      }
+    } catch (err: any) {
+      setFeedbackError(err.message || 'Erreur lors du téléversement.');
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  const handleAttachOkwinImagesToModalProduct = async (urls: string[]) => {
+    if (!urls || urls.length === 0) return;
+    if (editingProduct && !editingProduct.isNew && editingProduct.id) {
+      for (const url of urls) {
+        await adminFetch(`/api/admin/products/${editingProduct.id}/images`, {
+          method: 'POST',
+          body: JSON.stringify({ url }),
+        });
+      }
+      onRefresh();
+    }
+    setFormState((prev: any) => ({
+      ...prev,
+      imageUrls: Array.from(new Set([...(prev.imageUrls || []), ...urls])),
+    }));
+  };
+
+  const handleAttachOkwinImagesToPhotoModal = async (productId: number, urls: string[]) => {
+    if (!urls || urls.length === 0) return;
+    for (const url of urls) {
+      await adminFetch(`/api/admin/products/${productId}/images`, {
+        method: 'POST',
+        body: JSON.stringify({ url }),
+      });
+    }
+    onRefresh();
   };
 
   const handleAddPhotoUrl = async (productId: number) => {
@@ -636,6 +714,21 @@ export function AdminProducts({
                               {p.sku}
                               {p.barcode ? ` · CB ${p.barcode}` : ''}
                             </p>
+                            {Array.isArray(p.colors) && p.colors.length > 0 && (
+                              <div className="flex items-center gap-1 mt-1">
+                                {p.colors.slice(0, 6).map((c: any, idx: number) => (
+                                  <span
+                                    key={idx}
+                                    title={c.name}
+                                    className="w-3 h-3 rounded-full border border-slate-300"
+                                    style={{ backgroundColor: c.hex }}
+                                  />
+                                ))}
+                                <span className="text-[10px] text-slate-500 ml-0.5">
+                                  ({p.colors.length} couleur{p.colors.length > 1 ? 's' : ''})
+                                </span>
+                              </div>
+                            )}
                           </div>
                         </div>
                       </td>
@@ -1215,6 +1308,83 @@ export function AdminProducts({
                 />
               </div>
 
+              {/* Available Colors Editor */}
+              <ProductColorsEditor
+                colors={Array.isArray(formState.colors) ? formState.colors : []}
+                onChange={(nextColors) => setFormState({ ...formState, colors: nextColors })}
+                availableImages={Array.isArray(formState.imageUrls) ? formState.imageUrls : []}
+              />
+
+              {/* Product Photos + Okwin AI Studio (Background Changer & Multi-Image Prompt Generator) */}
+              <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-900">
+                      Photos du produit ({(formState.imageUrls || []).length})
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Ajoutez vos photos et utilisez <strong>Okwin AI Studio</strong> pour modifier
+                      l’arrière-plan ou générer d’autres images via prompts.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-white hover:bg-blue-50 text-blue-700 text-xs font-semibold cursor-pointer">
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>{uploadingPhoto ? 'Envoi...' : 'Ajouter photos'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => handleModalPhotoUpload(e.target.files)}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowModalOkwin((prev) => !prev)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-2xs"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>
+                        {showModalOkwin ? 'Masquer Okwin AI' : 'Okwin AI · Modifier l’arrière-plan'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {Array.isArray(formState.imageUrls) && formState.imageUrls.length > 0 && (
+                  <div className="flex items-center gap-2.5 overflow-x-auto pb-1">
+                    {formState.imageUrls.map((url: string, idx: number) => (
+                      <div
+                        key={`${url}-${idx}`}
+                        className="relative w-16 h-16 rounded-xl overflow-hidden border border-slate-200 bg-white shrink-0"
+                      >
+                        <ProductImage src={url} alt={`Photo ${idx + 1}`} />
+                        {idx === 0 && (
+                          <span className="absolute bottom-0 inset-x-0 bg-blue-700/90 text-white text-[9px] font-bold text-center py-0.5">
+                            Principale
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {showModalOkwin && (
+                  <OkwinImageStudio
+                    sourceImageUrl={(formState.imageUrls || [])[0] || ''}
+                    productName={formState.name || 'Produit 2Frères Phone'}
+                    onSourceImageUploaded={(url) =>
+                      setFormState((prev: any) => ({
+                        ...prev,
+                        imageUrls: Array.from(new Set([url, ...(prev.imageUrls || [])])),
+                      }))
+                    }
+                    onAddGeneratedImages={handleAttachOkwinImagesToModalProduct}
+                  />
+                )}
+              </div>
+
               <div className="flex items-center gap-6 text-sm">
                 <label className="inline-flex items-center gap-2 cursor-pointer">
                   <input
@@ -1330,6 +1500,18 @@ export function AdminProducts({
                       </button>
                       <button
                         type="button"
+                        onClick={() => {
+                          setSelectedOkwinSourceUrl(img.url);
+                          setShowPhotoModalOkwin(true);
+                        }}
+                        title="Modifier l’arrière-plan avec Okwin AI"
+                        className="text-indigo-600 hover:text-indigo-800 text-[11px] font-bold inline-flex items-center gap-0.5"
+                      >
+                        <Sparkles className="w-3 h-3" />
+                        <span>Okwin</span>
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => handleDeletePhoto(livePhotoProduct.id, img.id)}
                         className="text-slate-400 hover:text-red-600"
                         aria-label="Supprimer photo"
@@ -1339,6 +1521,45 @@ export function AdminProducts({
                     </div>
                   </div>
                 ))}
+              </div>
+
+              {/* Okwin AI Studio inside Photo Manager Modal */}
+              <div className="pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!selectedOkwinSourceUrl && livePhotoProduct.images?.[0]?.url) {
+                      setSelectedOkwinSourceUrl(livePhotoProduct.images[0].url);
+                    }
+                    setShowPhotoModalOkwin((prev) => !prev);
+                  }}
+                  className="w-full py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-sm"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>
+                    {showPhotoModalOkwin
+                      ? 'Masquer Okwin AI Photo Studio'
+                      : 'Okwin AI · Modifier l’arrière-plan & Générer d’autres images via Prompts'}
+                  </span>
+                </button>
+
+                {showPhotoModalOkwin && (
+                  <div className="mt-3">
+                    <OkwinImageStudio
+                      sourceImageUrl={
+                        selectedOkwinSourceUrl || livePhotoProduct.images?.[0]?.url || ''
+                      }
+                      productName={livePhotoProduct.name}
+                      onSourceImageUploaded={(url) => {
+                        setSelectedOkwinSourceUrl(url);
+                        handleAttachOkwinImagesToPhotoModal(livePhotoProduct.id, [url]);
+                      }}
+                      onAddGeneratedImages={(urls) =>
+                        handleAttachOkwinImagesToPhotoModal(livePhotoProduct.id, urls)
+                      }
+                    />
+                  </div>
+                )}
               </div>
             </div>
           </div>

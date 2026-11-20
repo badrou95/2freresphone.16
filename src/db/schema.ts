@@ -83,6 +83,7 @@ export const products = pgTable('products', {
   isActive: boolean('is_active').notNull().default(true),
   digitalAvailability: text('digital_availability').default('available'), // 'available' | 'limited' | 'paused'
   digitalActivationTemplate: text('digital_activation_template'),
+  colorsJson: text('colors_json').notNull().default('[]'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -378,6 +379,7 @@ export const landingPages = pgTable('landing_pages', {
   urgencyText: text('urgency_text').notNull().default('Stock limité · Expédition rapide 24/48h'),
   heroImageUrl: text('hero_image_url'),
   galleryImagesJson: text('gallery_images_json').notNull().default('[]'),
+  colorsJson: text('colors_json').notNull().default('[]'),
   benefitsJson: text('benefits_json').notNull().default('[]'),
   specsJson: text('specs_json').notNull().default('[]'),
   testimonialsJson: text('testimonials_json').notNull().default('[]'),

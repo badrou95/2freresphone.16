@@ -16,7 +16,9 @@ import {
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
 import { formatDzd } from '../../shared/domain';
+import { ProductColorOption } from '../../types';
 import { ProductImage } from '../ProductImage';
+import { OkwinImageStudio, ProductColorsEditor } from './OkwinImageStudio';
 
 interface AdminPagePilotProps {
   products: any[];
@@ -41,6 +43,7 @@ const DEFAULT_FORM = {
   urgencyText: 'Stock limité · Expédition rapide 24h/48h',
   heroImageUrl: '',
   galleryImages: [] as string[],
+  colors: [] as ProductColorOption[],
   accentColor: '#1d4ed8',
   isPublished: true,
   benefits: [
@@ -97,6 +100,8 @@ export function AdminPagePilot({
 }: AdminPagePilotProps) {
   // Express Photo-Only Gemini AI state ("Photos + Prix de vente uniquement")
   const [quickPhotos, setQuickPhotos] = useState<string[]>([]);
+  const [quickColors, setQuickColors] = useState<ProductColorOption[]>([]);
+  const [showQuickOkwin, setShowQuickOkwin] = useState(false);
   const [quickPriceDzd, setQuickPriceDzd] = useState<string>('3500');
   const [quickUploading, setQuickUploading] = useState(false);
   const [quickGenerating, setQuickGenerating] = useState(false);
@@ -104,6 +109,7 @@ export function AdminPagePilot({
 
   const [editingId, setEditingId] = useState<number | null>(null);
   const [showBuilder, setShowBuilder] = useState(false);
+  const [showBuilderOkwin, setShowBuilderOkwin] = useState(false);
   const [form, setForm] = useState<any>({ ...DEFAULT_FORM });
   const [generatingAi, setGeneratingAi] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -178,6 +184,7 @@ export function AdminPagePilot({
           priceDzd: priceNum,
           imageUrls: quickPhotos,
           heroImageUrl: quickPhotos[0],
+          colors: quickColors,
           tone: 'conversion',
           autoPublish,
         }),
@@ -187,6 +194,8 @@ export function AdminPagePilot({
       if (autoPublish && res.landingPage) {
         setLastCreatedLp(res.landingPage);
         setQuickPhotos([]);
+        setQuickColors([]);
+        setShowQuickOkwin(false);
         setFeedback({
           type: 'ok',
           msg: `Gemini AI a analysé vos photos et publié la landing page « ${res.landingPage.title} » à ${formatDzd(priceNum)} !`,
@@ -208,6 +217,12 @@ export function AdminPagePilot({
           urgencyText: g.urgencyText || DEFAULT_FORM.urgencyText,
           heroImageUrl: quickPhotos[0] || '',
           galleryImages: quickPhotos,
+          colors:
+            quickColors.length > 0
+              ? quickColors
+              : Array.isArray(g.colors)
+              ? g.colors
+              : [],
           accentColor: g.accentColor || '#1d4ed8',
           benefits: Array.isArray(g.benefits) ? g.benefits : DEFAULT_FORM.benefits,
           specs: Array.isArray(g.specs) ? g.specs : DEFAULT_FORM.specs,
@@ -254,6 +269,7 @@ export function AdminPagePilot({
           `Commandez votre ${prefillProduct.name} avec livraison rapide 58 wilayas et paiement à la livraison.`,
         heroImageUrl: prefillProduct.primaryImage || imgs[0] || '',
         galleryImages: imgs,
+        colors: Array.isArray(prefillProduct.colors) ? prefillProduct.colors : [],
       });
     } else {
       setForm({ ...DEFAULT_FORM });
@@ -285,6 +301,7 @@ export function AdminPagePilot({
       urgencyText: lp.urgencyText || DEFAULT_FORM.urgencyText,
       heroImageUrl: lp.heroImageUrl || gallery[0] || '',
       galleryImages: gallery,
+      colors: Array.isArray(lp.colors) ? lp.colors : [],
       accentColor: lp.accentColor || '#1d4ed8',
       isPublished: lp.isPublished !== false,
       benefits: Array.isArray(lp.benefits) && lp.benefits.length > 0 ? lp.benefits : DEFAULT_FORM.benefits,
@@ -326,6 +343,7 @@ export function AdminPagePilot({
         prev.subheadline,
       heroImageUrl: found.primaryImage || imgs[0] || prev.heroImageUrl,
       galleryImages: imgs.length > 0 ? imgs : prev.galleryImages,
+      colors: Array.isArray(found.colors) && found.colors.length > 0 ? found.colors : prev.colors,
     }));
   };
 
@@ -662,6 +680,31 @@ export function AdminPagePilot({
                 </div>
               ))}
             </div>
+
+            {/* Okwin AI Studio button in Quick Photo Mode */}
+            {quickPhotos.length > 0 && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowQuickOkwin((prev) => !prev)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-xs"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>
+                    {showQuickOkwin
+                      ? 'Masquer Okwin AI Studio'
+                      : 'Okwin AI · Modifier l’arrière-plan & Générer 4 images via Prompts'}
+                  </span>
+                </button>
+              </div>
+            )}
+
+            {/* Quick Available Colors Selector */}
+            <ProductColorsEditor
+              colors={quickColors}
+              onChange={setQuickColors}
+              availableImages={quickPhotos}
+            />
           </div>
 
           {/* Step 2: Selling Price + 1-Click Gemini Generation */}
@@ -716,6 +759,18 @@ export function AdminPagePilot({
             </div>
           </div>
         </div>
+
+        {/* Okwin AI Photo Studio Expanded inside Quick Mode */}
+        {showQuickOkwin && quickPhotos.length > 0 && (
+          <OkwinImageStudio
+            sourceImageUrl={quickPhotos[0]}
+            productName="Produit Landing Page"
+            onSourceImageUploaded={(url) => setQuickPhotos((prev) => [url, ...prev])}
+            onAddGeneratedImages={(urls) =>
+              setQuickPhotos((prev) => Array.from(new Set([...prev, ...urls])))
+            }
+          />
+        )}
       </div>
 
       {/* Quick Start from Existing Catalog Product */}
@@ -969,7 +1024,7 @@ export function AdminPagePilot({
                   </div>
                 )}
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold cursor-pointer">
                     <Upload className="w-3.5 h-3.5" />
                     <span>{uploadingImage ? 'Envoi...' : 'Téléverser des photos'}</span>
@@ -981,9 +1036,48 @@ export function AdminPagePilot({
                       onChange={(e) => handleUploadBuilderImages(e.target.files)}
                     />
                   </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowBuilderOkwin((prev) => !prev)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>
+                      {showBuilderOkwin ? 'Masquer Okwin AI' : 'Okwin AI · Arrière-plan & Prompts'}
+                    </span>
+                  </button>
                 </div>
               </div>
             </div>
+
+            {/* Available Colors Editor inside Builder */}
+            <ProductColorsEditor
+              colors={Array.isArray(form.colors) ? form.colors : []}
+              onChange={(nextColors) => setForm({ ...form, colors: nextColors })}
+              availableImages={Array.isArray(form.galleryImages) ? form.galleryImages : []}
+            />
+
+            {/* Okwin AI Photo Studio inside Builder */}
+            {showBuilderOkwin && (
+              <OkwinImageStudio
+                sourceImageUrl={form.heroImageUrl || (form.galleryImages || [])[0] || ''}
+                productName={form.productName || form.title || 'Produit Landing Page'}
+                onSourceImageUploaded={(url) =>
+                  setForm((prev: any) => ({
+                    ...prev,
+                    heroImageUrl: prev.heroImageUrl || url,
+                    galleryImages: Array.from(new Set([url, ...(prev.galleryImages || [])])),
+                  }))
+                }
+                onAddGeneratedImages={(urls) =>
+                  setForm((prev: any) => ({
+                    ...prev,
+                    heroImageUrl: prev.heroImageUrl || urls[0] || '',
+                    galleryImages: Array.from(new Set([...(prev.galleryImages || []), ...urls])),
+                  }))
+                }
+              />
+            )}
 
             {/* Step 3: Editable Benefits & FAQ */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-4 border-t border-slate-100">

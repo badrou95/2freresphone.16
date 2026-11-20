@@ -97,7 +97,11 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
           promoCode: appliedPromo || undefined,
           customerNotes,
           source,
-          items: items.map((i) => ({ productId: i.productId, quantity: i.quantity })),
+          items: items.map((i) => ({
+            productId: i.productId,
+            quantity: i.quantity,
+            selectedColor: i.selectedColor || undefined,
+          })),
         }),
       });
       setConfirmedOrder({ ...res.order, orderedItems: res.items });
