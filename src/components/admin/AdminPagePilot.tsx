@@ -1,9 +1,11 @@
 import React, { useMemo, useState } from 'react';
 import {
+  Camera,
   Check,
   Copy,
   ExternalLink,
   Eye,
+  ImagePlus,
   Pencil,
   Plus,
   Sparkles,
@@ -29,7 +31,7 @@ const DEFAULT_FORM = {
   title: '',
   slug: '',
   priceDzd: 3500,
-  compareAtPriceDzd: 4500,
+  compareAtPriceDzd: 4400,
   prompt: '',
   tone: 'conversion',
   heroBadge: 'OFFRE SPÉCIALE ALGÉRIE · LIVRAISON 58 WILAYAS',
@@ -38,6 +40,7 @@ const DEFAULT_FORM = {
   ctaText: 'Commander maintenant — Paiement à la livraison',
   urgencyText: 'Stock limité · Expédition rapide 24h/48h',
   heroImageUrl: '',
+  galleryImages: [] as string[],
   accentColor: '#1d4ed8',
   isPublished: true,
   benefits: [
@@ -92,6 +95,13 @@ export function AdminPagePilot({
   onRefresh,
   onOpenLandingPage,
 }: AdminPagePilotProps) {
+  // Express Photo-Only Gemini AI state ("Photos + Prix de vente uniquement")
+  const [quickPhotos, setQuickPhotos] = useState<string[]>([]);
+  const [quickPriceDzd, setQuickPriceDzd] = useState<string>('3500');
+  const [quickUploading, setQuickUploading] = useState(false);
+  const [quickGenerating, setQuickGenerating] = useState(false);
+  const [lastCreatedLp, setLastCreatedLp] = useState<any | null>(null);
+
   const [editingId, setEditingId] = useState<number | null>(null);
   const [showBuilder, setShowBuilder] = useState(false);
   const [form, setForm] = useState<any>({ ...DEFAULT_FORM });
@@ -107,9 +117,127 @@ export function AdminPagePilot({
     [products],
   );
 
+  // Upload multiple photos for Express Photo-Only Gemini Mode
+  const handleQuickPhotosUpload = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    setQuickUploading(true);
+    setFeedback(null);
+    try {
+      const uploadedUrls: string[] = [];
+      for (const file of Array.from(fileList).slice(0, 5)) {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('kind', 'other');
+        const res = await adminFetch<{ url: string }>('/api/admin/media/upload', {
+          method: 'POST',
+          body: fd,
+        });
+        if (res.url) uploadedUrls.push(res.url);
+      }
+      setQuickPhotos((prev) => [...prev, ...uploadedUrls]);
+    } catch (err: any) {
+      setFeedback({
+        type: 'err',
+        msg: err?.message || 'Erreur lors du téléversement des photos.',
+      });
+    } finally {
+      setQuickUploading(false);
+    }
+  };
+
+  // 1-Click Photo + Price Gemini Vision Generation (Auto-Publish OR Open in Editor)
+  const handleQuickGenerateFromPhotos = async (autoPublish: boolean) => {
+    if (quickPhotos.length === 0) {
+      setFeedback({
+        type: 'err',
+        msg: 'Veuillez ajouter au moins une photo du produit.',
+      });
+      return;
+    }
+    const priceNum = Math.max(0, Math.round(Number(quickPriceDzd) || 0));
+    if (priceNum <= 0) {
+      setFeedback({
+        type: 'err',
+        msg: 'Veuillez saisir le prix de vente en DZD.',
+      });
+      return;
+    }
+
+    setQuickGenerating(true);
+    setFeedback(null);
+    setLastCreatedLp(null);
+    try {
+      const res = await adminFetch<{
+        generated: any;
+        landingPage?: any;
+        source: string;
+        visionAnalyzedCount?: number;
+      }>('/api/admin/pagepilot/generate', {
+        method: 'POST',
+        body: JSON.stringify({
+          priceDzd: priceNum,
+          imageUrls: quickPhotos,
+          heroImageUrl: quickPhotos[0],
+          tone: 'conversion',
+          autoPublish,
+        }),
+      });
+
+      const g = res.generated;
+      if (autoPublish && res.landingPage) {
+        setLastCreatedLp(res.landingPage);
+        setQuickPhotos([]);
+        setFeedback({
+          type: 'ok',
+          msg: `Gemini AI a analysé vos photos et publié la landing page « ${res.landingPage.title} » à ${formatDzd(priceNum)} !`,
+        });
+        onRefresh();
+      } else {
+        setEditingId(null);
+        setForm({
+          ...DEFAULT_FORM,
+          productId: '',
+          productName: g.productName || 'Produit 2Frères Phone',
+          title: g.title || `${g.productName || 'Offre Spéciale'}`,
+          priceDzd: priceNum,
+          compareAtPriceDzd: g.compareAtPriceDzd || Math.round((priceNum * 1.25) / 100) * 100,
+          heroBadge: g.heroBadge || DEFAULT_FORM.heroBadge,
+          headline: g.headline || '',
+          subheadline: g.subheadline || '',
+          ctaText: g.ctaText || DEFAULT_FORM.ctaText,
+          urgencyText: g.urgencyText || DEFAULT_FORM.urgencyText,
+          heroImageUrl: quickPhotos[0] || '',
+          galleryImages: quickPhotos,
+          accentColor: g.accentColor || '#1d4ed8',
+          benefits: Array.isArray(g.benefits) ? g.benefits : DEFAULT_FORM.benefits,
+          specs: Array.isArray(g.specs) ? g.specs : DEFAULT_FORM.specs,
+          testimonials: Array.isArray(g.testimonials) ? g.testimonials : DEFAULT_FORM.testimonials,
+          faq: Array.isArray(g.faq) ? g.faq : DEFAULT_FORM.faq,
+        });
+        setShowBuilder(true);
+        setFeedback({
+          type: 'ok',
+          msg: `Gemini AI a détecté « ${g.productName} » depuis vos photos et rédigé toute la page. Vérifiez ou cliquez sur Publier !`,
+        });
+      }
+    } catch (err: any) {
+      setFeedback({
+        type: 'err',
+        msg: err?.message || 'Erreur lors de la création par photos avec Gemini AI.',
+      });
+    } finally {
+      setQuickGenerating(false);
+    }
+  };
+
   const openNewBuilder = (prefillProduct?: any) => {
     setEditingId(null);
     if (prefillProduct) {
+      const imgs = Array.isArray(prefillProduct.images)
+        ? prefillProduct.images.map((img: any) => img.url).filter(Boolean)
+        : prefillProduct.primaryImage
+        ? [prefillProduct.primaryImage]
+        : [];
       setForm({
         ...DEFAULT_FORM,
         productId: String(prefillProduct.id),
@@ -124,7 +252,8 @@ export function AdminPagePilot({
           prefillProduct.shortDescription ||
           prefillProduct.description ||
           `Commandez votre ${prefillProduct.name} avec livraison rapide 58 wilayas et paiement à la livraison.`,
-        heroImageUrl: prefillProduct.primaryImage || '',
+        heroImageUrl: prefillProduct.primaryImage || imgs[0] || '',
+        galleryImages: imgs,
       });
     } else {
       setForm({ ...DEFAULT_FORM });
@@ -135,6 +264,11 @@ export function AdminPagePilot({
 
   const openEditBuilder = (lp: any) => {
     setEditingId(lp.id);
+    const gallery = Array.isArray(lp.galleryImages) && lp.galleryImages.length > 0
+      ? lp.galleryImages
+      : lp.heroImageUrl
+      ? [lp.heroImageUrl]
+      : [];
     setForm({
       productId: lp.productId ? String(lp.productId) : '',
       productName: lp.productName || lp.title || '',
@@ -149,7 +283,8 @@ export function AdminPagePilot({
       subheadline: lp.subheadline || '',
       ctaText: lp.ctaText || DEFAULT_FORM.ctaText,
       urgencyText: lp.urgencyText || DEFAULT_FORM.urgencyText,
-      heroImageUrl: lp.heroImageUrl || '',
+      heroImageUrl: lp.heroImageUrl || gallery[0] || '',
+      galleryImages: gallery,
       accentColor: lp.accentColor || '#1d4ed8',
       isPublished: lp.isPublished !== false,
       benefits: Array.isArray(lp.benefits) && lp.benefits.length > 0 ? lp.benefits : DEFAULT_FORM.benefits,
@@ -171,6 +306,11 @@ export function AdminPagePilot({
     }
     const found = products.find((p) => String(p.id) === productIdStr);
     if (!found) return;
+    const imgs = Array.isArray(found.images)
+      ? found.images.map((img: any) => img.url).filter(Boolean)
+      : found.primaryImage
+      ? [found.primaryImage]
+      : [];
     setForm((prev: any) => ({
       ...prev,
       productId: String(found.id),
@@ -184,15 +324,19 @@ export function AdminPagePilot({
         found.shortDescription ||
         found.description ||
         prev.subheadline,
-      heroImageUrl: found.primaryImage || prev.heroImageUrl,
+      heroImageUrl: found.primaryImage || imgs[0] || prev.heroImageUrl,
+      galleryImages: imgs.length > 0 ? imgs : prev.galleryImages,
     }));
   };
 
   const handleGenerateWithAi = async () => {
-    if (!String(form.productName || '').trim()) {
+    const allImages = Array.from(
+      new Set([form.heroImageUrl, ...(form.galleryImages || [])].filter(Boolean)),
+    );
+    if (!String(form.productName || '').trim() && allImages.length === 0) {
       setFeedback({
         type: 'err',
-        msg: 'Veuillez d’abord sélectionner un produit ou saisir le nom du produit.',
+        msg: 'Téléversez au moins une photo du produit (ou indiquez son nom) pour que Gemini AI génère la page.',
       });
       return;
     }
@@ -209,18 +353,23 @@ export function AdminPagePilot({
             compareAtPriceDzd: form.compareAtPriceDzd,
             description: form.prompt,
             tone: form.tone,
+            heroImageUrl: form.heroImageUrl || allImages[0],
+            imageUrls: allImages,
           }),
         },
       );
       const g = res.generated;
       setForm((prev: any) => ({
         ...prev,
+        productName: g.productName || prev.productName || 'Offre Spéciale 2Frères Phone',
         title: g.title || prev.title,
+        compareAtPriceDzd: g.compareAtPriceDzd || prev.compareAtPriceDzd,
         heroBadge: g.heroBadge || prev.heroBadge,
         headline: g.headline || prev.headline,
         subheadline: g.subheadline || prev.subheadline,
         ctaText: g.ctaText || prev.ctaText,
         urgencyText: g.urgencyText || prev.urgencyText,
+        accentColor: g.accentColor || prev.accentColor,
         benefits: Array.isArray(g.benefits) ? g.benefits : prev.benefits,
         specs: Array.isArray(g.specs) ? g.specs : prev.specs,
         testimonials: Array.isArray(g.testimonials) ? g.testimonials : prev.testimonials,
@@ -228,31 +377,42 @@ export function AdminPagePilot({
       }));
       setFeedback({
         type: 'ok',
-        msg: 'PagePilot AI a généré votre landing page haute conversion ! Vous pouvez ajuster chaque texte ci-dessous avant d’enregistrer.',
+        msg: `Gemini AI a analysé votre produit (« ${g.productName || form.productName} ») et généré toute la page !`,
       });
     } catch (err: any) {
       setFeedback({
         type: 'err',
-        msg: err?.message || 'Erreur lors de la génération PagePilot AI.',
+        msg: err?.message || 'Erreur lors de la génération Gemini AI.',
       });
     } finally {
       setGeneratingAi(false);
     }
   };
 
-  const handleUploadHeroImage = async (file: File | undefined) => {
-    if (!file) return;
+  const handleUploadBuilderImages = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
     setUploadingImage(true);
     setFeedback(null);
     try {
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('kind', 'other');
-      const res = await adminFetch<{ url: string }>('/api/admin/media/upload', {
-        method: 'POST',
-        body: fd,
+      const newUrls: string[] = [];
+      for (const file of Array.from(fileList).slice(0, 5)) {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('kind', 'other');
+        const res = await adminFetch<{ url: string }>('/api/admin/media/upload', {
+          method: 'POST',
+          body: fd,
+        });
+        if (res.url) newUrls.push(res.url);
+      }
+      setForm((prev: any) => {
+        const nextGallery = Array.from(new Set([...(prev.galleryImages || []), ...newUrls]));
+        return {
+          ...prev,
+          heroImageUrl: prev.heroImageUrl || newUrls[0] || '',
+          galleryImages: nextGallery,
+        };
       });
-      setForm((prev: any) => ({ ...prev, heroImageUrl: res.url }));
     } catch (err: any) {
       setFeedback({ type: 'err', msg: err?.message || 'Erreur téléversement image.' });
     } finally {
@@ -269,8 +429,13 @@ export function AdminPagePilot({
     setSaving(true);
     setFeedback(null);
     try {
+      const allImages = Array.from(
+        new Set([form.heroImageUrl, ...(form.galleryImages || [])].filter(Boolean)),
+      );
       const payload = {
         ...form,
+        heroImageUrl: form.heroImageUrl || allImages[0] || null,
+        galleryImages: allImages,
         productId: form.productId ? Number(form.productId) : null,
         priceDzd: Math.max(0, Math.round(Number(form.priceDzd) || 0)),
         compareAtPriceDzd:
@@ -338,26 +503,27 @@ export function AdminPagePilot({
         <div className="space-y-1.5">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-blue-600/20 border border-blue-500/30 text-blue-300 text-xs font-semibold">
             <Sparkles className="w-3.5 h-3.5" />
-            <span>PagePilot : AI Page Builder</span>
+            <span>PagePilot : Gemini Vision AI Page Builder</span>
           </div>
           <h2 className="font-display font-bold text-xl">
-            Créez des Landing Pages de vente en 1 clic avec l’IA
+            Créez toute votre Landing Page uniquement par Photos + Prix de vente
           </h2>
           <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
-            Sélectionnez un produit de votre stock (ou créez une offre spéciale), cliquez sur{' '}
-            <strong>Générer avec PagePilot AI</strong> et obtenez instantanément une page de vente
-            complète avec arguments, avis clients, FAQ et formulaire de commande directe 58 wilayas
-            (idéal pour vos publicités Facebook, Instagram et TikTok Ads).
+            Ajoutez simplement <strong>1 ou plusieurs photos</strong> de votre produit et indiquez
+            votre <strong>prix de vente (DZD)</strong>. <strong>Gemini Vision AI</strong> reconnaît
+            automatiquement le produit sur vos photos et génère 100 % de la page (nom, titre
+            accrocheur, arguments, fiche technique, avis clients algériens, FAQ et formulaire 58
+            wilayas).
           </p>
         </div>
 
         <button
           type="button"
           onClick={() => openNewBuilder()}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shrink-0 shadow-sm"
+          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs font-semibold shrink-0"
         >
           <Plus className="w-4 h-4" />
-          <span>Nouvelle Landing Page</span>
+          <span>Éditeur Manuel Complet</span>
         </button>
       </div>
 
@@ -380,11 +546,183 @@ export function AdminPagePilot({
         </div>
       )}
 
+      {/* Instant Success Banner when Auto-Published via Photos */}
+      {lastCreatedLp && (
+        <div className="bg-emerald-950 text-white border border-emerald-700 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-emerald-300">
+              <Check className="w-3.5 h-3.5" />
+              <span>Landing Page créée par Gemini AI &amp; Publiée</span>
+            </span>
+            <h3 className="font-display font-bold text-base text-white">
+              {lastCreatedLp.title} — {formatDzd(lastCreatedLp.priceDzd)}
+            </h3>
+            <p className="text-xs text-emerald-200 font-mono">
+              {window.location.origin}/lp/{lastCreatedLp.slug}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => handleCopyPublicLink(lastCreatedLp)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold"
+            >
+              {copiedId === lastCreatedLp.id ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Lien copié !</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copier le lien public</span>
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                onOpenLandingPage
+                  ? onOpenLandingPage(lastCreatedLp.slug)
+                  : (window.location.href = `/lp/${lastCreatedLp.slug}`)
+              }
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              <span>Ouvrir la Landing Page</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* EXPRESS PHOTO-ONLY + SELLING PRICE CARD (GEMINI VISION AI) */}
+      <div className="bg-white border-2 border-blue-600 rounded-2xl p-5 sm:p-6 shadow-sm space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0">
+              <Camera className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-blue-700">
+                Mode Magique Gemini Vision AI
+              </span>
+              <h3 className="font-display font-bold text-base text-slate-900">
+                Création 100 % automatique par Photos + Prix de vente uniquement
+              </h3>
+            </div>
+          </div>
+          <span className="text-xs text-slate-500">
+            Aucun texte à écrire : Gemini analyse la photo et rédige toute la page
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* Step 1: Upload 1 or multiple product photos */}
+          <div className="lg:col-span-7 space-y-3">
+            <label className="block text-xs font-bold text-slate-800">
+              1. Ajoutez la ou les photos de votre produit (1 à 5 photos) *
+            </label>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex flex-col items-center justify-center w-32 h-32 rounded-xl border-2 border-dashed border-blue-400 bg-blue-50/50 hover:bg-blue-50 text-blue-700 cursor-pointer transition-colors p-3 text-center">
+                <ImagePlus className="w-6 h-6 mb-1.5" />
+                <span className="text-xs font-bold">
+                  {quickUploading ? 'Envoi...' : 'Ajouter photos'}
+                </span>
+                <span className="text-[10px] text-blue-600/80 mt-0.5">JPG, PNG, WebP</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  disabled={quickUploading || quickGenerating}
+                  className="hidden"
+                  onChange={(e) => handleQuickPhotosUpload(e.target.files)}
+                />
+              </label>
+
+              {quickPhotos.map((url, idx) => (
+                <div
+                  key={`${url}-${idx}`}
+                  className="relative w-32 h-32 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 group"
+                >
+                  <ProductImage src={url} alt={`Photo produit ${idx + 1}`} />
+                  {idx === 0 && (
+                    <span className="absolute bottom-1.5 left-1.5 px-2 py-0.5 rounded bg-blue-700 text-white text-[10px] font-bold">
+                      Principale
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setQuickPhotos((prev) => prev.filter((_, i) => i !== idx))}
+                    className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-slate-900/80 text-white flex items-center justify-center hover:bg-red-600"
+                    title="Retirer cette photo"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Step 2: Selling Price + 1-Click Gemini Generation */}
+          <div className="lg:col-span-5 bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-800 mb-1.5">
+                2. Mentionnez uniquement votre Prix de vente (DZD) *
+              </label>
+              <div className="relative">
+                <input
+                  type="number"
+                  min={1}
+                  value={quickPriceDzd}
+                  onChange={(e) => setQuickPriceDzd(e.target.value)}
+                  placeholder="Ex. 4500"
+                  className="w-full px-4 py-3 text-lg font-mono font-bold rounded-xl border border-slate-300 bg-white text-slate-900 pr-16"
+                />
+                <span className="absolute right-4 top-1/2 -translate-y-1/2 font-mono font-bold text-xs text-slate-500">
+                  DZD
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Gemini AI calculera automatiquement l’ancien prix barré promotionnel et rédigera
+                tous les arguments de vente à partir de vos photos.
+              </p>
+            </div>
+
+            <div className="space-y-2 pt-1">
+              <button
+                type="button"
+                disabled={quickGenerating || quickUploading || quickPhotos.length === 0}
+                onClick={() => handleQuickGenerateFromPhotos(true)}
+                className="w-full py-3 px-4 rounded-xl bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-sm transition-colors"
+              >
+                <Sparkles className={`w-4 h-4 ${quickGenerating ? 'animate-spin' : ''}`} />
+                <span>
+                  {quickGenerating
+                    ? 'Analyse des photos par Gemini AI en cours...'
+                    : 'Créer & Publier toute la Landing Page en 1 clic'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={quickGenerating || quickUploading || quickPhotos.length === 0}
+                onClick={() => handleQuickGenerateFromPhotos(false)}
+                className="w-full py-2.5 px-4 rounded-xl border border-blue-300 bg-white hover:bg-blue-50 disabled:opacity-50 text-blue-800 text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                <span>Générer par photos puis vérifier avant publication</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Quick Start from Existing Catalog Product */}
       {!showBuilder && physicalProducts.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-xl p-4">
           <p className="text-xs font-bold text-slate-800 mb-2.5">
-            Génération rapide depuis un article de votre catalogue :
+            Ou générer depuis un produit déjà présent dans votre stock :
           </p>
           <div className="flex items-center gap-2 overflow-x-auto pb-1">
             {physicalProducts.slice(0, 8).map((p) => (
@@ -414,7 +752,7 @@ export function AdminPagePilot({
               <h3 className="font-display font-bold text-base text-slate-900">
                 {editingId
                   ? `Modifier la Landing Page : ${form.title}`
-                  : 'PagePilot AI — Constructeur de Landing Page'}
+                  : 'PagePilot AI — Éditeur de Landing Page'}
               </h3>
             </div>
             <button
@@ -432,11 +770,11 @@ export function AdminPagePilot({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <span className="text-[11px] font-bold uppercase tracking-wider text-blue-800">
-                    Étape 1 · Source du produit &amp; Génération IA
+                    Étape 1 · Photos, Prix &amp; Génération Gemini Vision AI
                   </span>
                   <p className="text-xs text-slate-600">
-                    Reliez un produit de votre stock ou entrez un nom d’offre, puis laissez PagePilot AI
-                    rédiger toute la page.
+                    Téléversez vos photos et indiquez le prix : Gemini AI détecte le produit et
+                    remplit toute la page.
                   </p>
                 </div>
                 <button
@@ -448,8 +786,8 @@ export function AdminPagePilot({
                   <Sparkles className={`w-4 h-4 ${generatingAi ? 'animate-spin' : ''}`} />
                   <span>
                     {generatingAi
-                      ? 'Rédaction par PagePilot AI...'
-                      : 'Générer toute la page avec PagePilot AI'}
+                      ? 'Analyse photo & rédaction par Gemini AI...'
+                      : 'Analyser la photo & Générer avec Gemini AI'}
                   </span>
                 </button>
               </div>
@@ -464,7 +802,7 @@ export function AdminPagePilot({
                     onChange={(e) => handleSelectCatalogProduct(e.target.value)}
                     className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 bg-white"
                   >
-                    <option value="">— Offre libre / Produit personnalisé —</option>
+                    <option value="">— Détection par photo / Offre libre —</option>
                     {products.map((p) => (
                       <option key={p.id} value={String(p.id)}>
                         {p.name} ({formatDzd(p.priceDzd)})
@@ -475,20 +813,20 @@ export function AdminPagePilot({
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Nom du produit / de l’offre *
+                    Nom du produit (détecté par Gemini AI) *
                   </label>
                   <input
                     required
                     value={form.productName}
                     onChange={(e) => setForm({ ...form, productName: e.target.value })}
-                    placeholder="Ex. Écouteurs Anker SoundCore ANC"
+                    placeholder="Laissez vide avant de cliquer sur Générer par photo"
                     className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 bg-white"
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Prix de l’offre (DZD) *
+                    Prix de vente (DZD) *
                   </label>
                   <input
                     type="number"
@@ -513,34 +851,6 @@ export function AdminPagePilot({
                   />
                 </div>
               </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
-                <div className="lg:col-span-3">
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Points forts ou description rapide pour guider l’IA (optionnel)
-                  </label>
-                  <input
-                    value={form.prompt}
-                    onChange={(e) => setForm({ ...form, prompt: e.target.value })}
-                    placeholder="Ex. Charge rapide 65W GaN, compatible iPhone 15 Pro & Samsung S24, garantie 12 mois, cadeau offert..."
-                    className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 bg-white"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Style marketing
-                  </label>
-                  <select
-                    value={form.tone}
-                    onChange={(e) => setForm({ ...form, tone: e.target.value })}
-                    className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 bg-white"
-                  >
-                    <option value="conversion">Haute Conversion (Facebook / TikTok Ads)</option>
-                    <option value="premium">Premium &amp; Technologie</option>
-                    <option value="promo">Offre Flash &amp; Urgence</option>
-                  </select>
-                </div>
-              </div>
             </div>
 
             {/* Step 2: Hero Content & Visuals */}
@@ -549,7 +859,7 @@ export function AdminPagePilot({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      Titre interne / Onglet
+                      Titre de l’offre
                     </label>
                     <input
                       value={form.title}
@@ -578,7 +888,7 @@ export function AdminPagePilot({
                     required
                     value={form.headline}
                     onChange={(e) => setForm({ ...form, headline: e.target.value })}
-                    placeholder="Ex. Chargez 3 appareils simultanément à vitesse maximale"
+                    placeholder="Généré automatiquement par Gemini AI"
                     className="w-full px-3 py-2 text-sm font-semibold rounded-lg border border-slate-300"
                   />
                 </div>
@@ -634,36 +944,48 @@ export function AdminPagePilot({
                 </div>
               </div>
 
-              {/* Hero Image Upload / Preview */}
+              {/* Hero & Gallery Images Upload / Preview */}
               <div className="lg:col-span-4 space-y-3">
                 <label className="block text-xs font-semibold text-slate-700">
-                  Photo principale de la Landing Page
+                  Photos du produit ({(form.galleryImages || []).length || (form.heroImageUrl ? 1 : 0)})
                 </label>
                 <div className="aspect-square max-h-48 w-full rounded-xl overflow-hidden bg-slate-100 border border-slate-200 flex items-center justify-center">
                   <ProductImage src={form.heroImageUrl} alt={form.productName || 'Landing page'} />
                 </div>
+
+                {Array.isArray(form.galleryImages) && form.galleryImages.length > 0 && (
+                  <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                    {form.galleryImages.map((imgUrl: string, idx: number) => (
+                      <div
+                        key={`${imgUrl}-${idx}`}
+                        onClick={() => setForm({ ...form, heroImageUrl: imgUrl })}
+                        className={`relative w-12 h-12 rounded-lg overflow-hidden border-2 cursor-pointer shrink-0 ${
+                          form.heroImageUrl === imgUrl ? 'border-blue-600' : 'border-slate-200'
+                        }`}
+                      >
+                        <ProductImage src={imgUrl} alt={`Galerie ${idx + 1}`} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div className="flex items-center gap-2">
                   <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold cursor-pointer">
                     <Upload className="w-3.5 h-3.5" />
-                    <span>{uploadingImage ? 'Envoi...' : 'Téléverser une photo'}</span>
+                    <span>{uploadingImage ? 'Envoi...' : 'Téléverser des photos'}</span>
                     <input
                       type="file"
                       accept="image/*"
+                      multiple
                       className="hidden"
-                      onChange={(e) => handleUploadHeroImage(e.target.files?.[0])}
+                      onChange={(e) => handleUploadBuilderImages(e.target.files)}
                     />
                   </label>
-                  <input
-                    value={form.heroImageUrl}
-                    onChange={(e) => setForm({ ...form, heroImageUrl: e.target.value })}
-                    placeholder="Ou URL d’image..."
-                    className="flex-1 px-2.5 py-1.5 text-xs rounded-lg border border-slate-300"
-                  />
                 </div>
               </div>
             </div>
 
-            {/* Step 3: Editable Benefits & Specs */}
+            {/* Step 3: Editable Benefits & FAQ */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-4 border-t border-slate-100">
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
@@ -841,9 +1163,9 @@ export function AdminPagePilot({
               {landingPages.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-12 text-center text-xs text-slate-500">
-                    Aucune landing page créée pour le moment. Cliquez sur{' '}
-                    <strong>« Nouvelle Landing Page »</strong> ou sur un produit ci-dessus pour lancer{' '}
-                    <strong>PagePilot AI</strong>.
+                    Aucune landing page créée pour le moment. Téléversez une photo et indiquez votre
+                    prix de vente dans l’encadré <strong>Mode Magique Gemini Vision AI</strong>{' '}
+                    ci-dessus.
                   </td>
                 </tr>
               ) : (

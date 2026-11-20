@@ -51,11 +51,21 @@ export function LandingPageView({
   const [submitting, setSubmitting] = useState(false);
   const [orderError, setOrderError] = useState<string | null>(null);
   const [createdOrder, setCreatedOrder] = useState<any | null>(null);
+  const [selectedImage, setSelectedImage] = useState<string>('');
+
+  const galleryList = useMemo(() => {
+    if (!page) return [];
+    const raw = Array.isArray(page.galleryImages) ? page.galleryImages : [];
+    return Array.from(new Set([page.heroImageUrl, ...raw].filter(Boolean)));
+  }, [page]);
+
+  const activeImage = selectedImage || page?.heroImageUrl || galleryList[0] || '';
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError(null);
+    setSelectedImage('');
     apiFetch<{ landingPage: any }>(`/api/landing-pages/${encodeURIComponent(slug)}`)
       .then((res) => {
         if (!active) return;
@@ -287,13 +297,31 @@ export function LandingPageView({
 
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
               <div className="aspect-[4/3] w-full bg-slate-100 relative">
-                <ProductImage src={page.heroImageUrl} alt={page.productName} />
+                <ProductImage src={activeImage || page.heroImageUrl} alt={page.productName} />
                 {discountPercent && (
                   <span className="absolute top-4 left-4 px-3 py-1 rounded-lg bg-red-600 text-white font-mono text-xs font-bold shadow">
                     -{discountPercent}% PROMO
                   </span>
                 )}
               </div>
+              {galleryList.length > 1 && (
+                <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center gap-2.5 overflow-x-auto">
+                  {galleryList.map((imgUrl: string, idx: number) => (
+                    <button
+                      key={`${imgUrl}-${idx}`}
+                      type="button"
+                      onClick={() => setSelectedImage(imgUrl)}
+                      className={`w-16 h-16 rounded-xl overflow-hidden border-2 shrink-0 transition-all ${
+                        (activeImage || page.heroImageUrl) === imgUrl
+                          ? 'border-blue-600 ring-2 ring-blue-600/20'
+                          : 'border-slate-200 opacity-75 hover:opacity-100'
+                      }`}
+                    >
+                      <ProductImage src={imgUrl} alt={`${page.productName} ${idx + 1}`} />
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="p-5 flex flex-wrap items-center justify-between gap-4 bg-slate-900 text-white">
                 <div>
                   <p className="text-xs text-slate-400">Prix de l’offre spéciale</p>

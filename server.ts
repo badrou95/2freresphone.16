@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'fs';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -2987,58 +2988,142 @@ export function createApp() {
     }
   });
 
-  // Admin: PagePilot AI Generator using @google/genai (gemini-4-hydrogen) with smart fallback
+  // Admin: PagePilot AI Generator using @google/genai (gemini-4-hydrogen) with Multimodal Photo Analysis
   app.post('/api/admin/pagepilot/generate', requireAdmin, async (req, res) => {
     const b = req.body || {};
-    const productName = String(b.productName || '').trim();
+    const rawProductName = String(b.productName || '').trim();
     const priceDzd = Math.max(0, Math.round(Number(b.priceDzd) || 0));
-    const compareAtPriceDzd = b.compareAtPriceDzd ? Math.max(0, Math.round(Number(b.compareAtPriceDzd))) : Math.round(priceDzd * 1.25);
+    const compareAtPriceDzd = b.compareAtPriceDzd
+      ? Math.max(0, Math.round(Number(b.compareAtPriceDzd)))
+      : Math.round((priceDzd || 3500) * 1.25 / 100) * 100;
     const keyInfo = String(b.description || b.prompt || '').trim();
     const tone = String(b.tone || 'conversion').trim();
+    const autoPublish = Boolean(b.autoPublish);
 
-    if (!productName) {
-      return res.status(400).json({ error: 'Veuillez indiquer le nom du produit ou de l’offre.' });
+    // Collect image URLs (from multi-photo upload or heroImageUrl)
+    const rawImages: string[] = Array.isArray(b.imageUrls)
+      ? b.imageUrls.map((u: any) => String(u || '').trim()).filter(Boolean)
+      : [];
+    if (b.heroImageUrl && String(b.heroImageUrl).trim() && !rawImages.includes(String(b.heroImageUrl).trim())) {
+      rawImages.unshift(String(b.heroImageUrl).trim());
     }
 
-    const buildTemplateCopy = () => ({
-      title: `${productName} — Offre Spéciale`,
+    if (!rawProductName && rawImages.length === 0) {
+      return res.status(400).json({
+        error: 'Veuillez téléverser au moins une photo du produit (ou indiquer un nom de produit).',
+      });
+    }
+
+    // Resolve image binaries (from mediaAssets table, data URLs, or local public files) for Gemini Vision
+    const imageParts: Array<{ inlineData: { mimeType: string; data: string } }> = [];
+    const filenameHints: string[] = [];
+
+    for (const imgUrl of rawImages.slice(0, 4)) {
+      try {
+        const mediaMatch = imgUrl.match(/^\/api\/media\/(\d+)$/);
+        if (mediaMatch) {
+          const assetId = Number(mediaMatch[1]);
+          const [asset] = await db.select().from(mediaAssets).where(eq(mediaAssets.id, assetId));
+          if (asset && asset.dataBase64 && asset.mimeType.startsWith('image/')) {
+            imageParts.push({
+              inlineData: {
+                mimeType: asset.mimeType,
+                data: asset.dataBase64,
+              },
+            });
+            const cleanedName = String(asset.filename || '')
+              .replace(/\.[^.]+$/, '')
+              .replace(/[-_]+/g, ' ')
+              .replace(/\b(IMG|DSC|Screenshot|WhatsApp|Image|Photo|\d{6,})\b/gi, '')
+              .trim();
+            if (cleanedName.length >= 3) {
+              filenameHints.push(cleanedName);
+            }
+          }
+          continue;
+        }
+
+        const dataUrlMatch = imgUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+        if (dataUrlMatch) {
+          imageParts.push({
+            inlineData: {
+              mimeType: dataUrlMatch[1],
+              data: dataUrlMatch[2],
+            },
+          });
+          continue;
+        }
+
+        if (imgUrl.startsWith('/')) {
+          const localPath = path.join(process.cwd(), 'public', imgUrl.replace(/^\//, ''));
+          if (fs.existsSync(localPath)) {
+            const buf = fs.readFileSync(localPath);
+            const ext = path.extname(localPath).toLowerCase();
+            const mimeType =
+              ext === '.png'
+                ? 'image/png'
+                : ext === '.webp'
+                ? 'image/webp'
+                : 'image/jpeg';
+            imageParts.push({
+              inlineData: {
+                mimeType,
+                data: buf.toString('base64'),
+              },
+            });
+          }
+        }
+      } catch (imgErr) {
+        console.warn('Could not load image part for Gemini Vision:', imgErr);
+      }
+    }
+
+    const fallbackProductName =
+      rawProductName || filenameHints[0] || 'Offre Spéciale 2Frères Phone';
+
+    const buildTemplateCopy = (detectedName = fallbackProductName) => ({
+      productName: detectedName,
+      title: `${detectedName} — Offre Spéciale`,
+      compareAtPriceDzd,
       heroBadge: 'OFFRE LIMITÉE ALGÉRIE · LIVRAISON 58 WILAYAS',
-      headline: `${productName} : La performance et la fiabilité au meilleur prix en Algérie`,
+      headline: `${detectedName} : Qualité supérieure & performance garantie au meilleur prix`,
       subheadline:
         keyInfo ||
-        `Commandez aujourd’hui votre ${productName} chez 2Frères Phone. Paiement à la livraison après vérification, expédition express 24h/48h dans les 58 wilayas.`,
+        `Commandez dès maintenant votre ${detectedName} chez 2Frères Phone à seulement ${priceDzd} DZD. Paiement à la livraison après vérification et expédition express 24h/48h dans les 58 wilayas.`,
       ctaText: 'Commander maintenant — Paiement à la livraison',
-      urgencyText: 'Offre promotionnelle en stock limité · Expédition sous 24h',
+      urgencyText: 'Offre promotionnelle en stock limité · Expédition rapide 24h/48h',
+      accentColor: '#1d4ed8',
       benefits: [
         {
           title: 'Qualité Supérieure Certifiée 2Frères Phone',
-          description: 'Testé et sélectionné pour une durabilité maximale au quotidien.',
+          description: 'Produit testé et sélectionné avec soin pour une fiabilité maximale au quotidien.',
         },
         {
           title: 'Paiement 100 % à la Livraison (Main à Main)',
           description: 'Vous ne payez qu’à la réception de votre colis, à domicile ou en bureau Stop Desk.',
         },
         {
-          title: 'Livraison Rapide 58 Wilayas',
-          description: 'Expédition suivie sous 24h à 48h partout en Algérie avec numéro de suivi.',
+          title: 'Livraison Express 58 Wilayas',
+          description: 'Expédition suivie sous 24h à 48h partout en Algérie avec confirmation téléphonique.',
         },
         {
-          title: 'Garantie & Support Client Réactif',
-          description: 'Assistance directe par WhatsApp et téléphone 7j/7 par l’équipe 2Frères Phone.',
+          title: 'Garantie & Support Client 7j/7',
+          description: 'Assistance directe par WhatsApp et téléphone par l’équipe 2Frères Phone.',
         },
       ],
       specs: [
-        { label: 'Produit', value: productName },
+        { label: 'Produit', value: detectedName },
+        { label: 'État', value: 'Neuf sous emballage scellé' },
         { label: 'Garantie', value: 'Garantie satisfaction 2Frères Phone' },
-        { label: 'Livraison', value: '58 Wilayas (Domicile & Stop Desk)' },
-        { label: 'Paiement', value: 'En espèces à la livraison (DZD)' },
+        { label: 'Livraison', value: '58 Wilayas (À domicile & Stop Desk)' },
+        { label: 'Paiement', value: `${priceDzd} DZD à la livraison` },
       ],
       testimonials: [
         {
           name: 'Amine B.',
           wilaya: 'Alger',
           rating: 5,
-          comment: 'Reçu en 24h ! Produit conforme et excellente qualité, merci à l’équipe 2Frères Phone.',
+          comment: 'Reçu en 24h ! Exactement comme sur les photos, excellente qualité. Merci 2Frères Phone.',
         },
         {
           name: 'Sofiane K.',
@@ -3055,26 +3140,74 @@ export function createApp() {
       ],
       faq: [
         {
-          question: 'Comment se passe le paiement et la livraison ?',
+          question: 'Comment se passe la commande et le paiement ?',
           answer:
-            'Remplissez simplement le formulaire sur cette page. Notre équipe vous appelle pour confirmer, puis vous payez en espèces à la réception du colis dans votre wilaya.',
+            'Remplissez simplement vos coordonnées dans le formulaire sur cette page. Notre équipe vous appelle pour confirmer, puis vous payez en espèces à la réception du colis dans votre wilaya.',
         },
         {
-          question: 'Quels sont les délais de livraison ?',
+          question: 'Le produit reçu est-il identique aux photos ?',
           answer:
-            'La livraison prend généralement 24h à 48h pour les wilayas du Nord et 48h à 72h pour le Sud.',
+            'Oui, toutes nos photos présentent fidèlement le produit expédié par 2Frères Phone avec contrôle qualité avant envoi.',
         },
         {
-          question: 'Puis-je choisir la livraison en bureau Stop Desk ?',
+          question: 'Quels sont les délais de livraison dans ma wilaya ?',
           answer:
-            'Oui, vous pouvez choisir entre la livraison à domicile ou le retrait en bureau Stop Desk à tarif réduit directement dans le formulaire.',
+            'La livraison prend 24h à 48h pour les wilayas du Nord et 48h à 72h pour les wilayas du Sud, à domicile ou en bureau Stop Desk.',
         },
       ],
     });
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const maybeAutoPublish = async (generatedData: any, source: string) => {
+      if (!autoPublish) {
+        return res.json({
+          generated: generatedData,
+          source,
+          visionAnalyzedCount: imageParts.length,
+        });
+      }
+      const pName = String(generatedData.productName || fallbackProductName).trim();
+      const title = String(generatedData.title || `${pName} — Offre Spéciale`).trim();
+      const baseSlug = slugify(title);
+      const existingSlug = await db.select().from(landingPages).where(eq(landingPages.slug, baseSlug));
+      const finalSlug =
+        existingSlug.length > 0 ? `${baseSlug}-${Math.floor(100 + Math.random() * 900)}` : baseSlug;
+
+      const [created] = await db
+        .insert(landingPages)
+        .values({
+          title,
+          slug: finalSlug,
+          productId: b.productId ? Number(b.productId) : null,
+          productName: pName,
+          priceDzd,
+          compareAtPriceDzd: generatedData.compareAtPriceDzd || compareAtPriceDzd,
+          heroBadge: String(generatedData.heroBadge || 'OFFRE SPÉCIALE ALGÉRIE · LIVRAISON 58 WILAYAS').trim(),
+          headline: String(generatedData.headline || title).trim(),
+          subheadline: String(generatedData.subheadline || '').trim(),
+          ctaText: String(generatedData.ctaText || 'Commander maintenant — Paiement à la livraison').trim(),
+          urgencyText: String(generatedData.urgencyText || 'Stock limité · Expédition rapide 24/48h').trim(),
+          heroImageUrl: rawImages[0] || null,
+          galleryImagesJson: JSON.stringify(rawImages),
+          benefitsJson: JSON.stringify(Array.isArray(generatedData.benefits) ? generatedData.benefits : []),
+          specsJson: JSON.stringify(Array.isArray(generatedData.specs) ? generatedData.specs : []),
+          testimonialsJson: JSON.stringify(Array.isArray(generatedData.testimonials) ? generatedData.testimonials : []),
+          faqJson: JSON.stringify(Array.isArray(generatedData.faq) ? generatedData.faq : []),
+          accentColor: String(generatedData.accentColor || '#1d4ed8').trim(),
+          isPublished: true,
+        })
+        .returning();
+
+      return res.json({
+        generated: generatedData,
+        landingPage: serializeLandingPage(created),
+        source,
+        visionAnalyzedCount: imageParts.length,
+      });
+    };
+
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
     if (!apiKey) {
-      return res.json({ generated: buildTemplateCopy(), source: 'template' });
+      return await maybeAutoPublish(buildTemplateCopy(), 'template');
     }
 
     try {
@@ -3087,29 +3220,51 @@ export function createApp() {
         },
       });
 
-      const prompt = `Tu es PagePilot AI, expert en création de landing pages e-commerce à très haute conversion pour le marché algérien (boutique "2Frères Phone").
-Génère en français une landing page de vente complète, persuasive et professionnelle pour le produit suivant :
-- Nom du produit : ${productName}
-- Prix de vente : ${priceDzd} DZD${compareAtPriceDzd ? ` (Ancien prix barré : ${compareAtPriceDzd} DZD)` : ''}
-- Informations & arguments clés : ${keyInfo || 'Accessoire / produit tech haut de gamme vendu en Algérie avec paiement à la livraison 58 wilayas.'}
-- Style / Ton souhaité : ${tone}
+      const promptText = `Tu es PagePilot AI (propulsé par Gemini Vision), expert en création de landing pages e-commerce à très haute conversion pour le marché algérien (boutique "2Frères Phone").
+${
+  imageParts.length > 0
+    ? `Analyse attentivement la ou les ${imageParts.length} photo(s) du produit ci-jointes. Identifie visuellement le produit exact (type d'appareil ou accessoire, marque/modèle si visible, design, connectique, fonctionnalités visibles, couleur, finition) et rédige la TOTALITÉ de la landing page de vente à partir de ces photos.`
+    : ''
+}
+Informations fournies par le vendeur :
+- Prix de vente : ${priceDzd} DZD (Ancien prix barré suggéré : ${compareAtPriceDzd} DZD)
+${rawProductName ? `- Nom indiqué par le vendeur : ${rawProductName}` : `- Nom du produit : À DÉTECTER ET RÉDIGER AUTOMATIQUEMENT À PARTIR DES PHOTOS`}
+${keyInfo ? `- Notes complémentaires : ${keyInfo}` : ''}
+- Style marketing souhaité : ${tone}
 
-Respecte le contexte algérien (livraison 58 wilayas, domicile ou Stop Desk, paiement à la livraison en DZD, confirmation téléphonique rapide, confiance et garantie 2Frères Phone).`;
+Génère en français :
+1. "productName" : Le nom commercial précis, clair et attractif du produit vu sur les photos.
+2. "title" : Le titre de l'offre spéciale.
+3. "heroBadge" : Un badge d'accroche court en majuscules (ex: OFFRE SPÉCIALE ALGÉRIE · LIVRAISON 58 WILAYAS).
+4. "headline" : Un grand titre ultra-persuasif mettant en avant le bénéfice principal visible du produit.
+5. "subheadline" : Un sous-titre rassurant mentionnant les atouts du produit, le prix de ${priceDzd} DZD, la livraison 58 wilayas et le paiement à la livraison.
+6. "ctaText" : Le texte du bouton d'achat.
+7. "urgencyText" : Un message d'urgence/stock limité en haut de page.
+8. "accentColor" : Une couleur hexadécimale adaptée à l'univers visuel de la photo parmi "#1d4ed8" (bleu tech), "#0f172a" (noir premium), "#15803d" (vert confiance), ou "#dc2626" (rouge promo/gaming).
+9. "benefits" : 4 arguments de vente concrets basés sur les caractéristiques visuelles du produit + livraison Algérie.
+10. "specs" : 5 caractéristiques techniques pertinentes déduites du produit sur les photos.
+11. "testimonials" : 3 avis clients algériens réalistes (avec prénom, wilaya comme Alger, Oran, Constantine, Sétif, Béjaïa et note 5/5) parlant spécifiquement de ce produit.
+12. "faq" : 3 questions/réponses fréquentes adaptées à ce produit et à la livraison COD 58 wilayas.`;
+
+      const contentsPayload =
+        imageParts.length > 0 ? [...imageParts, { text: promptText }] : promptText;
 
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
-        contents: prompt,
+        contents: contentsPayload,
         config: {
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
             properties: {
+              productName: { type: Type.STRING },
               title: { type: Type.STRING },
               heroBadge: { type: Type.STRING },
               headline: { type: Type.STRING },
               subheadline: { type: Type.STRING },
               ctaText: { type: Type.STRING },
               urgencyText: { type: Type.STRING },
+              accentColor: { type: Type.STRING },
               benefits: {
                 type: Type.ARRAY,
                 items: {
@@ -3158,28 +3313,36 @@ Respecte le contexte algérien (livraison 58 wilayas, domicile ou Stop Desk, pai
       });
 
       const parsed = JSON.parse((response.text ?? '{}').trim());
-      const fallback = buildTemplateCopy();
-      return res.json({
-        generated: {
-          title: parsed.title || fallback.title,
-          heroBadge: parsed.heroBadge || fallback.heroBadge,
-          headline: parsed.headline || fallback.headline,
-          subheadline: parsed.subheadline || fallback.subheadline,
-          ctaText: parsed.ctaText || fallback.ctaText,
-          urgencyText: parsed.urgencyText || fallback.urgencyText,
-          benefits: Array.isArray(parsed.benefits) && parsed.benefits.length > 0 ? parsed.benefits : fallback.benefits,
-          specs: Array.isArray(parsed.specs) && parsed.specs.length > 0 ? parsed.specs : fallback.specs,
-          testimonials:
-            Array.isArray(parsed.testimonials) && parsed.testimonials.length > 0
-              ? parsed.testimonials
-              : fallback.testimonials,
-          faq: Array.isArray(parsed.faq) && parsed.faq.length > 0 ? parsed.faq : fallback.faq,
-        },
-        source: 'gemini',
-      });
+      const detectedProductName = String(parsed.productName || rawProductName || fallbackProductName).trim();
+      const fallback = buildTemplateCopy(detectedProductName);
+      const allowedColors = ['#1d4ed8', '#15803d', '#dc2626', '#0f172a'];
+      const chosenColor = allowedColors.includes(String(parsed.accentColor || '').trim())
+        ? String(parsed.accentColor).trim()
+        : '#1d4ed8';
+
+      const finalGenerated = {
+        productName: detectedProductName,
+        title: parsed.title || fallback.title,
+        compareAtPriceDzd,
+        heroBadge: parsed.heroBadge || fallback.heroBadge,
+        headline: parsed.headline || fallback.headline,
+        subheadline: parsed.subheadline || fallback.subheadline,
+        ctaText: parsed.ctaText || fallback.ctaText,
+        urgencyText: parsed.urgencyText || fallback.urgencyText,
+        accentColor: chosenColor,
+        benefits: Array.isArray(parsed.benefits) && parsed.benefits.length > 0 ? parsed.benefits : fallback.benefits,
+        specs: Array.isArray(parsed.specs) && parsed.specs.length > 0 ? parsed.specs : fallback.specs,
+        testimonials:
+          Array.isArray(parsed.testimonials) && parsed.testimonials.length > 0
+            ? parsed.testimonials
+            : fallback.testimonials,
+        faq: Array.isArray(parsed.faq) && parsed.faq.length > 0 ? parsed.faq : fallback.faq,
+      };
+
+      return await maybeAutoPublish(finalGenerated, 'gemini');
     } catch (error) {
       console.warn('PagePilot Gemini fallback to template:', error);
-      return res.json({ generated: buildTemplateCopy(), source: 'template' });
+      return await maybeAutoPublish(buildTemplateCopy(), 'template');
     }
   });
 
