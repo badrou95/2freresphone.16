@@ -1412,10 +1412,120 @@ export function createApp() {
     }
   };
 
+  // Automatically purges corrupted MDF token-scraper rows (2200 DZD / 1496 DZD / SQL view fragments / binary garbage)
+  // or cleans all previous MDF imports when forceCleanAllImports = true
+  let autoCorruptedPurgeDone = false;
+  const purgeCorruptedMdfProducts = async (
+    forceCleanAllImports = false,
+  ): Promise<{ deletedProductsCount: number; deletedAccountingCount: number }> => {
+    if (!forceCleanAllImports && autoCorruptedPurgeDone) {
+      return { deletedProductsCount: 0, deletedAccountingCount: 0 };
+    }
+    try {
+      await ensureAccountingTableReady();
+      let deletedProductsCount = 0;
+      let deletedAccountingCount = 0;
+
+      if (forceCleanAllImports) {
+        // Delete all accounting entries from previous stock imports
+        const delAcc = await db.execute(
+          sql.raw(`DELETE FROM accounting_entries WHERE import_id IS NOT NULL RETURNING id`),
+        );
+        deletedAccountingCount = Array.isArray((delAcc as any)?.rows)
+          ? (delAcc as any).rows.length
+          : 0;
+
+        // Delete all products created by previous MDF/stock imports that are not tied to customer orders
+        const delProds = await db.execute(
+          sql.raw(`
+            DELETE FROM products
+            WHERE id NOT IN (SELECT product_id FROM order_items WHERE product_id IS NOT NULL)
+              AND (
+                sku LIKE 'MDF-%'
+                OR sku LIKE 'ART-%'
+                OR id IN (SELECT product_id FROM stock_movements WHERE import_id IS NOT NULL AND product_id IS NOT NULL)
+                OR (price_dzd = 2200 AND cost_price_dzd = 1496)
+                OR name ~* '(FROM dbo\\.|GROUP BY |INNER JOIN|LEFT JOIN|LedgerBook|CustomerID|SUM\\(dbo\\.)'
+                OR name ~ '[ÅÒðÏØÞß÷þÿ]'
+              )
+            RETURNING id
+          `),
+        );
+        deletedProductsCount = Array.isArray((delProds as any)?.rows)
+          ? (delProds as any).rows.length
+          : 0;
+
+        await db.execute(sql.raw(`DELETE FROM stock_movements WHERE import_id IS NOT NULL`));
+      } else {
+        // Automatic cleanup of corrupted rows from the old zero-stripped token scraper
+        const delProds = await db.execute(
+          sql.raw(`
+            DELETE FROM products
+            WHERE id NOT IN (SELECT product_id FROM order_items WHERE product_id IS NOT NULL)
+              AND (
+                (sku LIKE 'MDF-%' AND price_dzd = 2200 AND cost_price_dzd = 1496)
+                OR (price_dzd = 2200 AND cost_price_dzd = 1496 AND sku ~ '^MDF-[0-9]+')
+                OR name ~* '(FROM dbo\\.|GROUP BY |INNER JOIN|LEFT JOIN|LedgerBook|CustomerID|SUM\\(dbo\\.|sys\\.sys)'
+                OR name ~ '[ÅÒðÏØÞß÷þÿ]'
+              )
+            RETURNING id
+          `),
+        );
+        deletedProductsCount = Array.isArray((delProds as any)?.rows)
+          ? (delProds as any).rows.length
+          : 0;
+
+        // Also delete corrupted accounting entries whose label contains SQL or binary garbage
+        const delAcc = await db.execute(
+          sql.raw(`
+            DELETE FROM accounting_entries
+            WHERE label ~* '(FROM dbo\\.|GROUP BY |INNER JOIN|LedgerBook|CustomerID|SUM\\(dbo\\.)'
+               OR label ~ '[ÅÒðÏØÞß÷þÿ]'
+            RETURNING id
+          `),
+        );
+        deletedAccountingCount = Array.isArray((delAcc as any)?.rows)
+          ? (delAcc as any).rows.length
+          : 0;
+
+        autoCorruptedPurgeDone = true;
+      }
+
+      return { deletedProductsCount, deletedAccountingCount };
+    } catch (e) {
+      console.warn('purgeCorruptedMdfProducts warning:', e);
+      return { deletedProductsCount: 0, deletedAccountingCount: 0 };
+    }
+  };
+
+  // Persist uploaded .MDF / .IDF buffers in mediaAssets (kind = 'mdf_backup') so the admin can regenerate in 1 click
+  const saveMdfBackupToMediaAssets = async (
+    files: { buffer: Buffer; originalname: string; mimetype?: string }[],
+  ) => {
+    try {
+      if (!files || files.length === 0) return;
+      await db.delete(mediaAssets).where(eq(mediaAssets.kind, 'mdf_backup'));
+      for (const f of files.slice(0, 3)) {
+        if (f.buffer.length <= 6 * 1024 * 1024) {
+          await db.insert(mediaAssets).values({
+            filename: f.originalname,
+            mimeType: f.mimetype || 'application/octet-stream',
+            dataBase64: f.buffer.toString('base64'),
+            sizeBytes: f.buffer.length,
+            kind: 'mdf_backup',
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('saveMdfBackupToMediaAssets warning:', e);
+    }
+  };
+
   // 3. Sales Ledger & Complete Accounting (Compta)
   app.get('/api/admin/sales', requireAdmin, async (_req, res) => {
     try {
       await ensureAccountingTableReady();
+      await purgeCorruptedMdfProducts(false);
       const [list, entries] = await Promise.all([
         db.select().from(sales).orderBy(desc(sales.recordedAt)),
         db
@@ -1594,6 +1704,7 @@ export function createApp() {
   // 5. Products CRUD + Direct Photo Upload + Low Stock Threshold
   app.get('/api/admin/products', requireAdmin, async (_req, res) => {
     try {
+      await purgeCorruptedMdfProducts(false);
       const [settingsRow] = await db.select().from(storeSettings).limit(1);
       const globalThreshold = settingsRow?.defaultLowStockThreshold ?? 10;
       const allCats = await db.select().from(categories);
@@ -1947,6 +2058,7 @@ export function createApp() {
   app.get('/api/admin/stock', requireAdmin, async (_req, res) => {
     try {
       await ensureAccountingTableReady();
+      await purgeCorruptedMdfProducts(false);
       await syncAllLowStockAlerts();
       const [settingsRow] = await db.select().from(storeSettings).limit(1);
       const globalThreshold = settingsRow?.defaultLowStockThreshold ?? 10;
@@ -2147,9 +2259,43 @@ export function createApp() {
     }
   });
 
+  // Check if a .MDF / .IDF backup is stored on the server for 1-click regeneration
+  app.get('/api/admin/stock/import/backup-status', requireAdmin, async (_req, res) => {
+    try {
+      const backups = await db
+        .select({ id: mediaAssets.id, filename: mediaAssets.filename, createdAt: mediaAssets.createdAt })
+        .from(mediaAssets)
+        .where(eq(mediaAssets.kind, 'mdf_backup'))
+        .orderBy(desc(mediaAssets.id))
+        .limit(3);
+      return res.json({
+        hasBackup: backups.length > 0,
+        fileName: backups.map((b) => b.filename).join(' + '),
+      });
+    } catch {
+      return res.json({ hasBackup: false });
+    }
+  });
+
+  // Explicit 1-click cleanup endpoint to remove corrupted or previous MDF imports
+  app.post('/api/admin/stock/import/cleanup', requireAdmin, async (req, res) => {
+    try {
+      const cleanAll = req.body?.cleanAllImports !== false;
+      const result = await purgeCorruptedMdfProducts(cleanAll);
+      await syncAllLowStockAlerts().catch(() => {});
+      return res.json({
+        ok: true,
+        ...result,
+      });
+    } catch (error: any) {
+      return res.status(500).json({ error: error?.message || 'Erreur lors du nettoyage.' });
+    }
+  });
+
   // Preview universal stock & accounting database files (.MDF + .IDF, DBF, BAK, Excel, CSV, TSV, JSON, XML, SQLite, SQL)
   app.post('/api/admin/stock/import/preview', requireAdmin, upload.any(), async (req, res) => {
     try {
+      await purgeCorruptedMdfProducts(false);
       const uploadedFiles = Array.isArray(req.files)
         ? (req.files as Express.Multer.File[])
         : req.file
@@ -2158,11 +2304,12 @@ export function createApp() {
       if (uploadedFiles.length === 0) {
         return res.status(400).json({ error: 'Veuillez sélectionner votre fichier (ou vos deux fichiers .mdf et .idf).' });
       }
+      await saveMdfBackupToMediaAssets(uploadedFiles);
+
       const preferredTable = req.body.tableName ? String(req.body.tableName) : undefined;
       const syncMode = (req.body.syncMode || 'full_sync') as StockSyncMode;
-      const customMapping: ColumnMapping | null = req.body.mappingJson
-        ? JSON.parse(String(req.body.mappingJson))
-        : null;
+      const rawMapStr = req.body.mappingJson || req.body.mapping;
+      const customMapping: ColumnMapping | null = rawMapStr ? JSON.parse(String(rawMapStr)) : null;
 
       const parsed = await parseStockDatabaseFiles(
         uploadedFiles.map((f) => ({ buffer: f.buffer, originalname: f.originalname })),
@@ -2261,6 +2408,312 @@ export function createApp() {
     }
   });
 
+  // Core helper to execute a full database import commit from buffer files
+  const executeDatabaseImportCommit = async (opts: {
+    files: { buffer: Buffer; originalname: string }[];
+    preferredTable?: string;
+    syncMode: StockSyncMode;
+    mapping: ColumnMapping;
+    defaultCategoryId: number | null;
+    saveProfileName: string;
+    generateAccounting: boolean;
+    cleanPreviousImports: boolean;
+    importedBy: string;
+  }) => {
+    const {
+      files,
+      preferredTable,
+      syncMode,
+      mapping,
+      defaultCategoryId,
+      saveProfileName,
+      generateAccounting,
+      cleanPreviousImports,
+      importedBy,
+    } = opts;
+
+    const purgeStats = await purgeCorruptedMdfProducts(cleanPreviousImports);
+
+    const parsed = await parseStockDatabaseFiles(files, preferredTable);
+    const selectedTableObj =
+      parsed.tables.find((t) => t.tableName === parsed.selectedTable) || parsed.tables[0];
+    const activeMapping = mapping.name ? mapping : parsed.suggestedMapping;
+
+    const existing = await db
+      .select({
+        id: products.id,
+        sku: products.sku,
+        barcode: products.barcode,
+        externalRef: products.externalRef,
+        name: products.name,
+        priceDzd: products.priceDzd,
+        costPriceDzd: products.costPriceDzd,
+        stockQuantity: products.stockQuantity,
+      })
+      .from(products);
+
+    const diff = buildDifferentialSyncPlan(selectedTableObj.rows, activeMapping, existing, syncMode);
+
+    const allCats = await db.select().from(categories);
+    const catByNormName = new Map(allCats.map((c) => [slugify(c.name), c.id]));
+
+    const combinedFileName = files.map((f) => f.originalname).join(' + ');
+
+    const [importRecord] = await db
+      .insert(stockImports)
+      .values({
+        fileName: combinedFileName,
+        fileFormat: parsed.format,
+        sourceTableOrSheet: parsed.selectedTable,
+        syncMode,
+        totalRows: selectedTableObj.rows.length,
+        addedCount: 0,
+        updatedCount: 0,
+        skippedCount: diff.skipped.length,
+        errorCount: diff.errors.length,
+        importedBy,
+      })
+      .returning();
+
+    await ensureAccountingTableReady();
+    await db.update(storeSettings).set({ catalogInitialized: true });
+
+    const clampInt32 = (val: unknown, min = -2000000000, max = 2000000000): number => {
+      const n = Math.round(Number(val) || 0);
+      if (!Number.isFinite(n)) return 0;
+      return Math.min(max, Math.max(min, n));
+    };
+
+    let addedCount = 0;
+    let updatedCount = 0;
+    const addedProductIds: number[] = [];
+
+    const usedSkus = new Set<string>(existing.map((e) => String(e.sku || '').toLowerCase()));
+
+    // 1a. Resolve or create categories first
+    for (const item of diff.toAdd) {
+      if (item.categoryName) {
+        const catSlug = slugify(item.categoryName) || 'catalogue-mdf';
+        if (!catByNormName.has(catSlug)) {
+          const [newCat] = await db
+            .insert(categories)
+            .values({
+              name: String(item.categoryName).slice(0, 120),
+              slug: `${catSlug}-${Date.now().toString(36).slice(-3)}-${item.rowIndex}`,
+              categoryGroup: item.productType === 'digital' ? 'digital' : 'accessories',
+              sortOrder: 99,
+              isActive: true,
+            })
+            .onConflictDoNothing()
+            .returning();
+          if (newCat) {
+            catByNormName.set(catSlug, newCat.id);
+          }
+        }
+      }
+    }
+
+    // 1b. Batch-insert new articles in chunks of 80 for fast execution on serverless Postgres
+    const productRowsToInsert = diff.toAdd.map((item, idx) => {
+      let resolvedCatId = defaultCategoryId;
+      if (item.categoryName) {
+        const catSlug = slugify(item.categoryName) || 'catalogue-mdf';
+        if (catByNormName.has(catSlug)) {
+          resolvedCatId = catByNormName.get(catSlug)!;
+        }
+      }
+      let candidateSku = String(item.sku || `ART-${importRecord.id}-${idx + 1}`).trim().slice(0, 80);
+      if (!candidateSku || usedSkus.has(candidateSku.toLowerCase())) {
+        candidateSku = `${candidateSku || 'ART'}-${importRecord.id}-${item.rowIndex}`;
+      }
+      usedSkus.add(candidateSku.toLowerCase());
+
+      const baseSlug = slugify(item.name) || 'article';
+      const uniqueSlug = `${baseSlug.slice(0, 80)}-${importRecord.id}-${item.rowIndex}-${idx}`;
+
+      return {
+        categoryId: resolvedCatId,
+        sku: candidateSku,
+        barcode: item.barcode ? String(item.barcode).slice(0, 80) : null,
+        externalRef: item.externalRef ? String(item.externalRef).slice(0, 80) : null,
+        name: String(item.name || 'Article Stock').slice(0, 220),
+        slug: uniqueSlug,
+        brand: item.brand ? String(item.brand).slice(0, 80) : null,
+        shortDescription: item.description ? String(item.description).slice(0, 160) : null,
+        description: item.description ? String(item.description) : '',
+        productType: item.productType,
+        priceDzd: clampInt32(item.priceDzd, 0),
+        costPriceDzd: clampInt32(item.costPriceDzd, 0),
+        stockQuantity: clampInt32(item.stockQuantity, 0),
+        lowStockThreshold: item.lowStockThreshold !== null ? clampInt32(item.lowStockThreshold, 0) : null,
+        isFeatured: false,
+        isActive: true,
+      };
+    });
+
+    const CHUNK_SIZE = 80;
+    const movementsToInsert: {
+      productId: number;
+      importId: number;
+      delta: number;
+      previousQty: number;
+      newQty: number;
+      reason: string;
+      createdBy: string;
+    }[] = [];
+
+    for (let i = 0; i < productRowsToInsert.length; i += CHUNK_SIZE) {
+      const chunk = productRowsToInsert.slice(i, i + CHUNK_SIZE);
+      const insertedChunk = await db
+        .insert(products)
+        .values(chunk)
+        .onConflictDoNothing()
+        .returning({ id: products.id, stockQuantity: products.stockQuantity });
+
+      for (const ins of insertedChunk) {
+        addedCount += 1;
+        addedProductIds.push(ins.id);
+        movementsToInsert.push({
+          productId: ins.id,
+          importId: importRecord.id,
+          delta: ins.stockQuantity,
+          previousQty: 0,
+          newQty: ins.stockQuantity,
+          reason: `Import sauvegarde (${combinedFileName})`,
+          createdBy: importedBy,
+        });
+      }
+    }
+
+    // 2. Update existing articles if mode is add_and_update_stock or full_sync (ALWAYS preserving photos!)
+    for (const entry of diff.toUpdate) {
+      const nextQty = clampInt32(entry.incoming.stockQuantity, 0);
+      const updateData: Record<string, unknown> = {
+        stockQuantity: nextQty,
+        updatedAt: new Date(),
+      };
+      if (syncMode === 'full_sync') {
+        if (entry.incoming.priceDzd > 0) updateData.priceDzd = clampInt32(entry.incoming.priceDzd, 0);
+        if (entry.incoming.costPriceDzd > 0) updateData.costPriceDzd = clampInt32(entry.incoming.costPriceDzd, 0);
+        if (entry.incoming.brand) updateData.brand = String(entry.incoming.brand).slice(0, 80);
+        if (entry.incoming.description) updateData.description = String(entry.incoming.description);
+      }
+      await db.update(products).set(updateData).where(eq(products.id, entry.existing.id));
+      if (entry.stockDelta !== 0) {
+        movementsToInsert.push({
+          productId: entry.existing.id,
+          importId: importRecord.id,
+          delta: clampInt32(entry.stockDelta),
+          previousQty: clampInt32(entry.existing.stockQuantity, 0),
+          newQty: nextQty,
+          reason: `Synchro fichier stock (${combinedFileName})`,
+          createdBy: importedBy,
+        });
+      }
+      updatedCount += 1;
+    }
+
+    // Batch-insert stock movements
+    for (let i = 0; i < movementsToInsert.length; i += CHUNK_SIZE) {
+      const movChunk = movementsToInsert.slice(i, i + CHUNK_SIZE);
+      await db.insert(stockMovements).values(movChunk).catch((e) => {
+        console.warn('Stock movement batch insert warning:', e);
+      });
+    }
+
+    // 3. Generate & store Complete Accounting ("Toute la Compta") in PostgreSQL
+    let accountingGeneratedCount = 0;
+    if (generateAccounting) {
+      await ensureAccountingTableReady();
+      const extractedAccounting = extractAccountingEntriesFromTables(
+        parsed.tables,
+        selectedTableObj.rows,
+        activeMapping,
+        combinedFileName,
+      );
+      const accountingRowsToInsert = extractedAccounting.map((acc, idx) => ({
+        reference: `${String(acc.reference || `CPT-${idx + 1}`).slice(0, 60)}-${importRecord.id}`,
+        entryType: acc.entryType || 'sale',
+        category: String(acc.category || 'Ventes & Encaissements').slice(0, 100),
+        label: String(acc.label || 'Écriture comptable importée').slice(0, 240),
+        partnerName: String(acc.partnerName || 'Sauvegarde .MDF/.IDF').slice(0, 140),
+        amountDzd: clampInt32(acc.amountDzd, 0),
+        costDzd: clampInt32(acc.costDzd, 0),
+        marginDzd: clampInt32(acc.marginDzd),
+        paymentMethod: String(acc.paymentMethod || 'Caisse / Sauvegarde').slice(0, 80),
+        sourceFile: String(combinedFileName).slice(0, 160),
+        importId: importRecord.id,
+        entryDate: acc.entryDate ? new Date(acc.entryDate) : new Date(),
+        notes: String(acc.notes || ''),
+      }));
+
+      for (let i = 0; i < accountingRowsToInsert.length; i += CHUNK_SIZE) {
+        const accChunk = accountingRowsToInsert.slice(i, i + CHUNK_SIZE);
+        try {
+          await db.insert(accountingEntries).values(accChunk);
+          accountingGeneratedCount += accChunk.length;
+        } catch (accErr) {
+          console.warn('Batch accounting insert fallback to single row:', accErr);
+          for (const singleAcc of accChunk) {
+            try {
+              await db.insert(accountingEntries).values(singleAcc);
+              accountingGeneratedCount += 1;
+            } catch (singleErr) {
+              console.warn('Skipping malformed accounting entry:', singleErr);
+            }
+          }
+        }
+      }
+    }
+
+    // 4. Save mapping profile if requested
+    if (saveProfileName) {
+      await db
+        .insert(importMappingProfiles)
+        .values({
+          profileName: saveProfileName,
+          sourceFormat: parsed.format,
+          tableOrSheetName: parsed.selectedTable,
+          columnMappingJson: JSON.stringify(activeMapping),
+          defaultSyncMode: syncMode,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: importMappingProfiles.profileName,
+          set: {
+            sourceFormat: parsed.format,
+            tableOrSheetName: parsed.selectedTable,
+            columnMappingJson: JSON.stringify(activeMapping),
+            defaultSyncMode: syncMode,
+            updatedAt: new Date(),
+          },
+        });
+    }
+
+    await syncAllLowStockAlerts().catch(() => {});
+
+    const [finalImport] = await db
+      .update(stockImports)
+      .set({
+        addedCount,
+        updatedCount,
+        summaryJson: JSON.stringify({
+          addedProductIds: addedProductIds.slice(0, 500),
+          accountingGeneratedCount,
+          purgedOldProductsCount: purgeStats.deletedProductsCount,
+        }),
+      })
+      .where(eq(stockImports.id, importRecord.id))
+      .returning();
+
+    return {
+      importRecord: finalImport,
+      addedProductIds,
+      accountingGeneratedCount,
+      purgedOldProductsCount: purgeStats.deletedProductsCount,
+    };
+  };
+
   // Commit universal stock & accounting database import (.MDF + .IDF, etc.) with differential sync
   app.post('/api/admin/stock/import/commit', requireAdmin, upload.any(), async (req: AuthRequest, res) => {
     try {
@@ -2272,295 +2725,77 @@ export function createApp() {
       if (uploadedFiles.length === 0) {
         return res.status(400).json({ error: 'Fichier(s) de sauvegarde manquant(s).' });
       }
+      await saveMdfBackupToMediaAssets(uploadedFiles);
+
       const preferredTable = req.body.tableName ? String(req.body.tableName) : undefined;
       const syncMode = (req.body.syncMode || 'full_sync') as StockSyncMode;
-      const mapping: ColumnMapping = req.body.mappingJson
-        ? JSON.parse(String(req.body.mappingJson))
-        : { name: '' };
+      const rawMapStr = req.body.mappingJson || req.body.mapping;
+      const mapping: ColumnMapping = rawMapStr ? JSON.parse(String(rawMapStr)) : { name: '' };
       const defaultCategoryId = req.body.defaultCategoryId ? Number(req.body.defaultCategoryId) : null;
       const saveProfileName = req.body.saveProfileName ? String(req.body.saveProfileName).trim() : '';
       const generateAccounting = req.body.generateAccounting !== 'false';
+      const cleanPreviousImports = req.body.cleanPreviousImports !== 'false';
 
-      const parsed = await parseStockDatabaseFiles(
-        uploadedFiles.map((f) => ({ buffer: f.buffer, originalname: f.originalname })),
+      const result = await executeDatabaseImportCommit({
+        files: uploadedFiles.map((f) => ({ buffer: f.buffer, originalname: f.originalname })),
         preferredTable,
-      );
-      const selectedTableObj =
-        parsed.tables.find((t) => t.tableName === parsed.selectedTable) || parsed.tables[0];
-      const activeMapping = mapping.name ? mapping : parsed.suggestedMapping;
-
-      const existing = await db
-        .select({
-          id: products.id,
-          sku: products.sku,
-          barcode: products.barcode,
-          externalRef: products.externalRef,
-          name: products.name,
-          priceDzd: products.priceDzd,
-          costPriceDzd: products.costPriceDzd,
-          stockQuantity: products.stockQuantity,
-        })
-        .from(products);
-
-      const diff = buildDifferentialSyncPlan(selectedTableObj.rows, activeMapping, existing, syncMode);
-
-      const allCats = await db.select().from(categories);
-      const catByNormName = new Map(allCats.map((c) => [slugify(c.name), c.id]));
-
-      const combinedFileName = uploadedFiles.map((f) => f.originalname).join(' + ');
-
-      const [importRecord] = await db
-        .insert(stockImports)
-        .values({
-          fileName: combinedFileName,
-          fileFormat: parsed.format,
-          sourceTableOrSheet: parsed.selectedTable,
-          syncMode,
-          totalRows: selectedTableObj.rows.length,
-          addedCount: 0,
-          updatedCount: 0,
-          skippedCount: diff.skipped.length,
-          errorCount: diff.errors.length,
-          importedBy: req.adminUser?.email || 'admin',
-        })
-        .returning();
-
-      await ensureAccountingTableReady();
-      await db.update(storeSettings).set({ catalogInitialized: true });
-
-      const clampInt32 = (val: unknown, min = -2000000000, max = 2000000000): number => {
-        const n = Math.round(Number(val) || 0);
-        if (!Number.isFinite(n)) return 0;
-        return Math.min(max, Math.max(min, n));
-      };
-
-      let addedCount = 0;
-      let updatedCount = 0;
-      const addedProductIds: number[] = [];
-
-      // Pre-track used SKUs so we can batch-insert 880+ products without single-row SKU collisions
-      const usedSkus = new Set<string>(existing.map((e) => String(e.sku || '').toLowerCase()));
-
-      // 1a. Resolve or create categories first
-      for (const item of diff.toAdd) {
-        if (item.categoryName) {
-          const catSlug = slugify(item.categoryName) || 'catalogue-mdf';
-          if (!catByNormName.has(catSlug)) {
-            const [newCat] = await db
-              .insert(categories)
-              .values({
-                name: String(item.categoryName).slice(0, 120),
-                slug: `${catSlug}-${Date.now().toString(36).slice(-3)}-${item.rowIndex}`,
-                categoryGroup: item.productType === 'digital' ? 'digital' : 'accessories',
-                sortOrder: 99,
-                isActive: true,
-              })
-              .onConflictDoNothing()
-              .returning();
-            if (newCat) {
-              catByNormName.set(catSlug, newCat.id);
-            }
-          }
-        }
-      }
-
-      // 1b. Batch-insert new articles in chunks of 80 for fast execution on serverless Postgres
-      const productRowsToInsert = diff.toAdd.map((item, idx) => {
-        let resolvedCatId = defaultCategoryId;
-        if (item.categoryName) {
-          const catSlug = slugify(item.categoryName) || 'catalogue-mdf';
-          if (catByNormName.has(catSlug)) {
-            resolvedCatId = catByNormName.get(catSlug)!;
-          }
-        }
-        let candidateSku = String(item.sku || `MDF-${importRecord.id}-${idx + 1}`).trim().slice(0, 80);
-        if (!candidateSku || usedSkus.has(candidateSku.toLowerCase())) {
-          candidateSku = `${candidateSku || 'MDF'}-${importRecord.id}-${item.rowIndex}`;
-        }
-        usedSkus.add(candidateSku.toLowerCase());
-
-        const baseSlug = slugify(item.name) || 'article';
-        const uniqueSlug = `${baseSlug.slice(0, 80)}-${importRecord.id}-${item.rowIndex}-${idx}`;
-
-        return {
-          categoryId: resolvedCatId,
-          sku: candidateSku,
-          barcode: item.barcode ? String(item.barcode).slice(0, 80) : null,
-          externalRef: item.externalRef ? String(item.externalRef).slice(0, 80) : null,
-          name: String(item.name || 'Article Stock').slice(0, 220),
-          slug: uniqueSlug,
-          brand: item.brand ? String(item.brand).slice(0, 80) : null,
-          shortDescription: item.description ? String(item.description).slice(0, 160) : null,
-          description: item.description ? String(item.description) : '',
-          productType: item.productType,
-          priceDzd: clampInt32(item.priceDzd, 0),
-          costPriceDzd: clampInt32(item.costPriceDzd, 0),
-          stockQuantity: clampInt32(item.stockQuantity, 0),
-          lowStockThreshold: item.lowStockThreshold !== null ? clampInt32(item.lowStockThreshold, 0) : null,
-          isFeatured: false,
-          isActive: true,
-        };
+        syncMode,
+        mapping,
+        defaultCategoryId,
+        saveProfileName,
+        generateAccounting,
+        cleanPreviousImports,
+        importedBy: req.adminUser?.email || 'admin',
       });
 
-      const CHUNK_SIZE = 80;
-      const movementsToInsert: {
-        productId: number;
-        importId: number;
-        delta: number;
-        previousQty: number;
-        newQty: number;
-        reason: string;
-        createdBy: string;
-      }[] = [];
-
-      for (let i = 0; i < productRowsToInsert.length; i += CHUNK_SIZE) {
-        const chunk = productRowsToInsert.slice(i, i + CHUNK_SIZE);
-        const insertedChunk = await db
-          .insert(products)
-          .values(chunk)
-          .onConflictDoNothing()
-          .returning({ id: products.id, stockQuantity: products.stockQuantity });
-
-        for (const ins of insertedChunk) {
-          addedCount += 1;
-          addedProductIds.push(ins.id);
-          movementsToInsert.push({
-            productId: ins.id,
-            importId: importRecord.id,
-            delta: ins.stockQuantity,
-            previousQty: 0,
-            newQty: ins.stockQuantity,
-            reason: `Import sauvegarde (${combinedFileName})`,
-            createdBy: req.adminUser?.email || 'admin',
-          });
-        }
-      }
-
-      // 2. Update existing articles if mode is add_and_update_stock or full_sync (ALWAYS preserving photos!)
-      for (const entry of diff.toUpdate) {
-        const nextQty = clampInt32(entry.incoming.stockQuantity, 0);
-        const updateData: Record<string, unknown> = {
-          stockQuantity: nextQty,
-          updatedAt: new Date(),
-        };
-        if (syncMode === 'full_sync') {
-          if (entry.incoming.priceDzd > 0) updateData.priceDzd = clampInt32(entry.incoming.priceDzd, 0);
-          if (entry.incoming.costPriceDzd > 0) updateData.costPriceDzd = clampInt32(entry.incoming.costPriceDzd, 0);
-          if (entry.incoming.brand) updateData.brand = String(entry.incoming.brand).slice(0, 80);
-          if (entry.incoming.description) updateData.description = String(entry.incoming.description);
-        }
-        await db.update(products).set(updateData).where(eq(products.id, entry.existing.id));
-        if (entry.stockDelta !== 0) {
-          movementsToInsert.push({
-            productId: entry.existing.id,
-            importId: importRecord.id,
-            delta: clampInt32(entry.stockDelta),
-            previousQty: clampInt32(entry.existing.stockQuantity, 0),
-            newQty: nextQty,
-            reason: `Synchro fichier stock (${combinedFileName})`,
-            createdBy: req.adminUser?.email || 'admin',
-          });
-        }
-        updatedCount += 1;
-      }
-
-      // Batch-insert stock movements
-      for (let i = 0; i < movementsToInsert.length; i += CHUNK_SIZE) {
-        const movChunk = movementsToInsert.slice(i, i + CHUNK_SIZE);
-        await db.insert(stockMovements).values(movChunk).catch((e) => {
-          console.warn('Stock movement batch insert warning:', e);
-        });
-      }
-
-      // 3. Generate & store Complete Accounting ("Toute la Compta") in PostgreSQL
-      let accountingGeneratedCount = 0;
-      if (generateAccounting) {
-        await ensureAccountingTableReady();
-        const extractedAccounting = extractAccountingEntriesFromTables(
-          parsed.tables,
-          selectedTableObj.rows,
-          activeMapping,
-          combinedFileName,
-        );
-        const accountingRowsToInsert = extractedAccounting.map((acc, idx) => ({
-          reference: `${String(acc.reference || `CPT-${idx + 1}`).slice(0, 60)}-${importRecord.id}`,
-          entryType: acc.entryType || 'sale',
-          category: String(acc.category || 'Ventes & Encaissements').slice(0, 100),
-          label: String(acc.label || 'Écriture comptable importée').slice(0, 240),
-          partnerName: String(acc.partnerName || 'Sauvegarde .MDF/.IDF').slice(0, 140),
-          amountDzd: clampInt32(acc.amountDzd, 0),
-          costDzd: clampInt32(acc.costDzd, 0),
-          marginDzd: clampInt32(acc.marginDzd),
-          paymentMethod: String(acc.paymentMethod || 'Caisse / Sauvegarde').slice(0, 80),
-          sourceFile: String(combinedFileName).slice(0, 160),
-          importId: importRecord.id,
-          entryDate: acc.entryDate ? new Date(acc.entryDate) : new Date(),
-          notes: String(acc.notes || ''),
-        }));
-
-        for (let i = 0; i < accountingRowsToInsert.length; i += CHUNK_SIZE) {
-          const accChunk = accountingRowsToInsert.slice(i, i + CHUNK_SIZE);
-          try {
-            await db.insert(accountingEntries).values(accChunk);
-            accountingGeneratedCount += accChunk.length;
-          } catch (accErr) {
-            console.warn('Batch accounting insert fallback to single row:', accErr);
-            for (const singleAcc of accChunk) {
-              try {
-                await db.insert(accountingEntries).values(singleAcc);
-                accountingGeneratedCount += 1;
-              } catch (singleErr) {
-                console.warn('Skipping malformed accounting entry:', singleErr);
-              }
-            }
-          }
-        }
-      }
-
-      // 4. Save mapping profile if requested
-      if (saveProfileName) {
-        await db
-          .insert(importMappingProfiles)
-          .values({
-            profileName: saveProfileName,
-            sourceFormat: parsed.format,
-            tableOrSheetName: parsed.selectedTable,
-            columnMappingJson: JSON.stringify(activeMapping),
-            defaultSyncMode: syncMode,
-            updatedAt: new Date(),
-          })
-          .onConflictDoUpdate({
-            target: importMappingProfiles.profileName,
-            set: {
-              sourceFormat: parsed.format,
-              tableOrSheetName: parsed.selectedTable,
-              columnMappingJson: JSON.stringify(activeMapping),
-              defaultSyncMode: syncMode,
-              updatedAt: new Date(),
-            },
-          });
-      }
-
-      await syncAllLowStockAlerts().catch(() => {});
-
-      const [finalImport] = await db
-        .update(stockImports)
-        .set({
-          addedCount,
-          updatedCount,
-          summaryJson: JSON.stringify({ addedProductIds: addedProductIds.slice(0, 500), accountingGeneratedCount }),
-        })
-        .where(eq(stockImports.id, importRecord.id))
-        .returning();
-
-      return res.status(201).json({
-        importRecord: finalImport,
-        addedProductIds,
-        accountingGeneratedCount,
-      });
+      return res.status(201).json(result);
     } catch (error: any) {
       console.error('Import commit error:', error);
       return res.status(500).json({ error: error?.message || 'Erreur lors de l’importation du stock et de la comptabilité.' });
+    }
+  });
+
+  // 1-Click Regenerate & Fix from the last uploaded .MDF / .IDF backup stored in mediaAssets
+  app.post('/api/admin/stock/import/regenerate', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const savedBackups = await db
+        .select()
+        .from(mediaAssets)
+        .where(eq(mediaAssets.kind, 'mdf_backup'))
+        .orderBy(asc(mediaAssets.id));
+
+      if (savedBackups.length === 0) {
+        await purgeCorruptedMdfProducts(true);
+        return res.status(400).json({
+          error:
+            'Les anciennes lignes erronées ont été nettoyées. Veuillez resélectionner votre fichier .MDF dans le Point 1 puis cliquer sur « Sauvegarder & Intégrer maintenant ».',
+        });
+      }
+
+      const files = savedBackups.map((b) => ({
+        buffer: Buffer.from(b.dataBase64, 'base64'),
+        originalname: b.filename || 'nabils.mdf',
+      }));
+
+      const b = req.body || {};
+      const result = await executeDatabaseImportCommit({
+        files,
+        preferredTable: b.tableName ? String(b.tableName) : undefined,
+        syncMode: (b.syncMode || 'full_sync') as StockSyncMode,
+        mapping: b.mapping && b.mapping.name ? b.mapping : { name: '' },
+        defaultCategoryId: b.defaultCategoryId ? Number(b.defaultCategoryId) : null,
+        saveProfileName: '',
+        generateAccounting: b.generateAccounting !== false,
+        cleanPreviousImports: true,
+        importedBy: req.adminUser?.email || 'admin',
+      });
+
+      return res.json(result);
+    } catch (error: any) {
+      console.error('Regenerate MDF backup error:', error);
+      return res.status(500).json({
+        error: error?.message || 'Erreur lors de la régénération de la sauvegarde .MDF.',
+      });
     }
   });
 

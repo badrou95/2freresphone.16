@@ -24,7 +24,10 @@ import { printProductThermalLabels } from '../../lib/printer';
 import { formatDzd, toCsv } from '../../shared/domain';
 import { StoreSettings } from '../../types';
 import { FinancialMarginWidget } from './FinancialMarginWidget';
-import { MdfIdfBinaryDecoderModule } from './MdfIdfBinaryDecoderModule';
+import {
+  compactDatabaseFileForUpload,
+  MdfIdfBinaryDecoderModule,
+} from './MdfIdfBinaryDecoderModule';
 
 interface AdminStockImportProps {
   products: any[];
@@ -48,59 +51,6 @@ const MAPPING_FIELDS: { key: string; label: string; required?: boolean }[] = [
   { key: 'lowStockThreshold', label: 'Seuil alerte stock' },
   { key: 'description', label: 'Description' },
 ];
-
-/**
- * Compacts large binary database files (.mdf, .idf, .ldf, .ndf, .bak, .dbf) in the browser
- * by collapsing long empty zero-byte (0x00) allocation runs so even 100MB+ .MDF/.IDF files
- * upload rapidly without hitting serverless payload limits.
- */
-async function compactDatabaseFileForUpload(file: File): Promise<File> {
-  const isBinaryDbExt = /\.(mdf|idf|ldf|ndf|idx|ndx|bak|dat|dbf|fic)$/i.test(file.name);
-  if (!isBinaryDbExt && file.size <= 2.5 * 1024 * 1024) {
-    return file;
-  }
-  if (file.size <= 1.5 * 1024 * 1024) {
-    return file;
-  }
-  try {
-    const sliceLimit = Math.min(file.size, 60 * 1024 * 1024);
-    const ab = await file.slice(0, sliceLimit).arrayBuffer();
-    const src = new Uint8Array(ab);
-    // Keep SQLite / ZIP / OLE2 headers intact if smaller than 3.5MB
-    if (
-      file.size <= 3.5 * 1024 * 1024 &&
-      src.length >= 4 &&
-      ((src[0] === 0x50 && src[1] === 0x4b) || (src[0] === 0xd0 && src[1] === 0xcf) || src[0] === 0x53)
-    ) {
-      return file;
-    }
-    const maxOut = 2.2 * 1024 * 1024;
-    const out = new Uint8Array(Math.min(src.length, maxOut));
-    let outIdx = 0;
-    let zeroRun = 0;
-    for (let i = 0; i < src.length && outIdx < maxOut; i++) {
-      const b = src[i];
-      if (b === 0) {
-        zeroRun++;
-        if (zeroRun <= 4) {
-          out[outIdx++] = 0;
-        }
-      } else {
-        zeroRun = 0;
-        out[outIdx++] = b;
-      }
-    }
-    const compactedBlob = new Blob([out.subarray(0, outIdx)], {
-      type: file.type || 'application/octet-stream',
-    });
-    return new File([compactedBlob], file.name, {
-      type: file.type || 'application/octet-stream',
-      lastModified: file.lastModified,
-    });
-  } catch {
-    return file;
-  }
-}
 
 export function AdminStockImport({
   products,

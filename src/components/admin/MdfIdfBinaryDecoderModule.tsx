@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Calculator,
   CheckCircle2,
@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Save,
   Sparkles,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
@@ -24,52 +25,103 @@ interface MdfIdfBinaryDecoderModuleProps {
 }
 
 /**
- * Compacts large binary database files (.mdf, .idf, .ldf, .ndf, .bak, .dbf) in the browser
- * by collapsing long empty zero-byte (0x00) allocation runs so even 100MB+ .MDF/.IDF files
- * upload rapidly without hitting serverless payload limits.
+ * Lossless 8192-byte SQL Server Data Page Extractor for browser uploads:
+ * - NEVER strips zero bytes inside 8192-byte SQL Server pages (which would destroy
+ *   page alignment, null bitmaps, var-offset arrays, and 8-byte FLOAT64/DECIMAL prices).
+ * - Trims .LDF transaction log files > 64 KB down to 16 KB (only header needed).
+ * - For .MDF / .NDF files > 3.5 MB, copies complete 8192-byte SQL Server data & catalog pages
+ *   verbatim while skipping empty allocation pages and sys.sysobjvalues (m_objId = 60).
  */
 export async function compactDatabaseFileForUpload(file: File): Promise<File> {
-  const isBinaryDbExt = /\.(mdf|idf|ldf|ndf|idx|ndx|bak|dat|dbf|fic)$/i.test(file.name);
-  if (!isBinaryDbExt && file.size <= 2.5 * 1024 * 1024) {
-    return file;
-  }
-  if (file.size <= 1.5 * 1024 * 1024) {
-    return file;
-  }
-  try {
-    const sliceLimit = Math.min(file.size, 60 * 1024 * 1024);
-    const ab = await file.slice(0, sliceLimit).arrayBuffer();
-    const src = new Uint8Array(ab);
-    if (
-      file.size <= 3.5 * 1024 * 1024 &&
-      src.length >= 4 &&
-      ((src[0] === 0x50 && src[1] === 0x4b) || (src[0] === 0xd0 && src[1] === 0xcf) || src[0] === 0x53)
-    ) {
-      return file;
-    }
-    const maxOut = 2.2 * 1024 * 1024;
-    const out = new Uint8Array(Math.min(src.length, maxOut));
-    let outIdx = 0;
-    let zeroRun = 0;
-    for (let i = 0; i < src.length && outIdx < maxOut; i++) {
-      const b = src[i];
-      if (b === 0) {
-        zeroRun++;
-        if (zeroRun <= 4) {
-          out[outIdx++] = 0;
-        }
-      } else {
-        zeroRun = 0;
-        out[outIdx++] = b;
-      }
-    }
-    const compactedBlob = new Blob([out.subarray(0, outIdx)], {
-      type: file.type || 'application/octet-stream',
-    });
-    return new File([compactedBlob], file.name, {
+  // 1. Transaction log files (.ldf) only carry transaction rollbacks; keep 16 KB header
+  if (/\.ldf$/i.test(file.name) && file.size > 64 * 1024) {
+    return new File([file.slice(0, 16 * 1024)], file.name, {
       type: file.type || 'application/octet-stream',
       lastModified: file.lastModified,
     });
+  }
+
+  // 2. For any file <= 3.5 MB, upload 100% untouched so every 8192-byte page stays bit-exact
+  if (file.size <= 3.5 * 1024 * 1024) {
+    return file;
+  }
+
+  // 3. For larger .MDF / .NDF / .IDF files (> 3.5 MB), extract complete 8192-byte SQL Server pages verbatim
+  const isMdfOrIdf = /\.(mdf|ndf|idf|bak|dat)$/i.test(file.name);
+  if (!isMdfOrIdf) {
+    return file;
+  }
+
+  try {
+    const sliceLimit = Math.min(file.size, 80 * 1024 * 1024);
+    const ab = await file.slice(0, sliceLimit).arrayBuffer();
+    const src = new Uint8Array(ab);
+    const view = new DataView(ab);
+    const PAGE_SIZE = 8192;
+
+    if (src.length < PAGE_SIZE * 2) {
+      return file;
+    }
+
+    // Detect if file consists of 8192-byte SQL Server pages
+    const keptPages: Uint8Array[] = [];
+    let keptBytes = 0;
+    const maxBytes = 3.8 * 1024 * 1024;
+    let validSqlPages = 0;
+
+    for (let off = 0; off + PAGE_SIZE <= src.length && keptBytes + PAGE_SIZE <= maxBytes; off += PAGE_SIZE) {
+      const mHeaderVersion = src[off];
+      const mType = src[off + 1];
+      const mFlagBits = view.getUint16(off + 4, true);
+      const mSlotCnt = view.getUint16(off + 22, true);
+      const mObjId = view.getUint32(off + 24, true);
+      const mFreeCnt = view.getUint16(off + 28, true);
+      const mFreeData = view.getUint16(off + 30, true);
+
+      if (
+        mHeaderVersion === 1 &&
+        mType === 1 &&
+        (mFlagBits & 0x0004) !== 0 &&
+        mSlotCnt >= 1 &&
+        mSlotCnt <= 1000 &&
+        mFreeData >= 96 &&
+        mFreeData <= PAGE_SIZE &&
+        mFreeCnt < PAGE_SIZE
+      ) {
+        validSqlPages++;
+        // Skip sys.sysobjvalues (60) which stores internal SQL view definitions ("FROM dbo.Customer...")
+        if (mObjId === 60) continue;
+        // Keep system schema catalog pages (3, 5, 7, 29, 34, 41, 54, 55) and all user table pages (>= 100 or 0)
+        const isCatalogPage =
+          mObjId === 3 ||
+          mObjId === 5 ||
+          mObjId === 7 ||
+          mObjId === 29 ||
+          mObjId === 34 ||
+          mObjId === 41 ||
+          mObjId === 54 ||
+          mObjId === 55;
+        if (isCatalogPage || mObjId >= 100 || mObjId === 0) {
+          keptPages.push(src.subarray(off, off + PAGE_SIZE));
+          keptBytes += PAGE_SIZE;
+        }
+      }
+    }
+
+    if (validSqlPages >= 2 && keptPages.length > 0) {
+      const out = new Uint8Array(keptBytes);
+      let cursor = 0;
+      for (const page of keptPages) {
+        out.set(page, cursor);
+        cursor += PAGE_SIZE;
+      }
+      return new File([out], file.name, {
+        type: file.type || 'application/octet-stream',
+        lastModified: file.lastModified,
+      });
+    }
+
+    return file;
   } catch {
     return file;
   }
@@ -86,14 +138,33 @@ export function MdfIdfBinaryDecoderModule({
   const [extraFiles, setExtraFiles] = useState<File[]>([]);
   const [syncMode, setSyncMode] = useState<'full_sync' | 'add_and_update_stock' | 'add_only'>('full_sync');
   const [generateAccounting, setGenerateAccounting] = useState<boolean>(true);
+  const [cleanPreviousImports, setCleanPreviousImports] = useState<boolean>(true);
   const [defaultCategoryId, setDefaultCategoryId] = useState<string>('');
   const [autoIntegrateOnSelect, setAutoIntegrateOnSelect] = useState<boolean>(false);
 
   const [parsing, setParsing] = useState<boolean>(false);
   const [committing, setCommitting] = useState<boolean>(false);
+  const [cleaningUp, setCleaningUp] = useState<boolean>(false);
+  const [regenerating, setRegenerating] = useState<boolean>(false);
   const [preview, setPreview] = useState<any | null>(null);
+  const [selectedTableName, setSelectedTableName] = useState<string>('');
+  const [customMapping, setCustomMapping] = useState<Record<string, string>>({ name: '' });
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [statusBanner, setStatusBanner] = useState<string | null>(null);
   const [commitResult, setCommitResult] = useState<any | null>(null);
+  const [hasSavedBackupOnServer, setHasSavedBackupOnServer] = useState<boolean>(false);
+  const [savedBackupFileName, setSavedBackupFileName] = useState<string>('');
+
+  useEffect(() => {
+    adminFetch<any>('/api/admin/stock/import/backup-status')
+      .then((res) => {
+        if (res?.hasBackup) {
+          setHasSavedBackupOnServer(true);
+          setSavedBackupFileName(res.fileName || 'nabils.mdf');
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const allFiles: File[] = [
     ...(mdfFile ? [mdfFile] : []),
@@ -101,10 +172,16 @@ export function MdfIdfBinaryDecoderModule({
     ...extraFiles,
   ];
 
-  const runBinaryDecodePreview = async (filesToAnalyze: File[], shouldAutoCommit = false) => {
+  const runBinaryDecodePreview = async (
+    filesToAnalyze: File[],
+    shouldAutoCommit = false,
+    preferredTable?: string,
+    mappingOverride?: Record<string, string>,
+  ) => {
     if (filesToAnalyze.length === 0) return;
     setParsing(true);
     setErrorMsg(null);
+    setStatusBanner(null);
     setCommitResult(null);
     try {
       const compactedFiles = await Promise.all(
@@ -115,14 +192,25 @@ export function MdfIdfBinaryDecoderModule({
         fd.append('files', f);
       }
       fd.append('syncMode', syncMode);
+      if (preferredTable) {
+        fd.append('tableName', preferredTable);
+      }
+      if (mappingOverride && mappingOverride.name) {
+        fd.append('mappingJson', JSON.stringify(mappingOverride));
+      }
       const res = await adminFetch<any>('/api/admin/stock/import/preview', {
         method: 'POST',
         body: fd,
       });
       setPreview(res);
+      setSelectedTableName(res.selectedTable || '');
+      const serverMapping = res.mapping || res.inferredMapping || { name: '' };
+      setCustomMapping(serverMapping);
+      setHasSavedBackupOnServer(true);
+      setSavedBackupFileName(res.fileName || filesToAnalyze[0]?.name || 'nabils.mdf');
 
       if (shouldAutoCommit || autoIntegrateOnSelect) {
-        await executeCommit(filesToAnalyze, res);
+        await executeCommit(filesToAnalyze, res, serverMapping);
       }
     } catch (err: any) {
       setErrorMsg(err?.message || 'Erreur lors du décodage binaire des fichiers .MDF / .IDF.');
@@ -131,14 +219,23 @@ export function MdfIdfBinaryDecoderModule({
     }
   };
 
-  const executeCommit = async (filesToCommit?: File[], previewOverride?: any) => {
+  const executeCommit = async (
+    filesToCommit?: File[],
+    previewOverride?: any,
+    mappingOverride?: Record<string, string>,
+  ) => {
     const targetFiles = filesToCommit && filesToCommit.length > 0 ? filesToCommit : allFiles;
     if (targetFiles.length === 0) {
+      if (hasSavedBackupOnServer) {
+        await handleRegenerateFromServerBackup();
+        return;
+      }
       setErrorMsg('Veuillez sélectionner votre fichier .MDF (Point 1) et/ou votre fichier .IDF (Point 2).');
       return;
     }
     setCommitting(true);
     setErrorMsg(null);
+    setStatusBanner(null);
     try {
       const compactedFiles = await Promise.all(
         targetFiles.map((f) => compactDatabaseFileForUpload(f)),
@@ -148,13 +245,23 @@ export function MdfIdfBinaryDecoderModule({
         fd.append('files', f);
       }
       const activePreview = previewOverride || preview;
-      if (activePreview?.selectedTable) {
-        fd.append('tableName', activePreview.selectedTable);
+      const tableToUse = selectedTableName || activePreview?.selectedTable;
+      if (tableToUse) {
+        fd.append('tableName', tableToUse);
       }
       fd.append('syncMode', syncMode);
       fd.append('generateAccounting', generateAccounting ? 'true' : 'false');
-      if (activePreview?.inferredMapping) {
-        fd.append('mapping', JSON.stringify(activePreview.inferredMapping));
+      fd.append('cleanPreviousImports', cleanPreviousImports ? 'true' : 'false');
+
+      const activeMap =
+        mappingOverride && mappingOverride.name
+          ? mappingOverride
+          : customMapping && customMapping.name
+          ? customMapping
+          : activePreview?.mapping || activePreview?.inferredMapping;
+
+      if (activeMap && activeMap.name) {
+        fd.append('mappingJson', JSON.stringify(activeMap));
       }
       if (defaultCategoryId) {
         fd.append('defaultCategoryId', defaultCategoryId);
@@ -165,11 +272,67 @@ export function MdfIdfBinaryDecoderModule({
         body: fd,
       });
       setCommitResult(res);
+      setHasSavedBackupOnServer(true);
       onRefresh();
     } catch (err: any) {
       setErrorMsg(err?.message || 'Erreur lors de la sauvegarde et de l’intégration dans la base de données.');
     } finally {
       setCommitting(false);
+    }
+  };
+
+  const handleCleanupCorruptedImport = async () => {
+    setCleaningUp(true);
+    setErrorMsg(null);
+    setStatusBanner(null);
+    try {
+      const res = await adminFetch<any>('/api/admin/stock/import/cleanup', {
+        method: 'POST',
+        body: JSON.stringify({ cleanAllImports: true }),
+      });
+      setStatusBanner(
+        `Nettoyage effectué : ${res.deletedProductsCount ?? 0} article(s) erroné(s) (2 200 DZD / SQL) et ${res.deletedAccountingCount ?? 0} écriture(s) retirés du système.`,
+      );
+      onRefresh();
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Erreur lors du nettoyage de l’ancien import.');
+    } finally {
+      setCleaningUp(false);
+    }
+  };
+
+  const handleRegenerateFromServerBackup = async () => {
+    if (allFiles.length > 0) {
+      await executeCommit(allFiles);
+      return;
+    }
+    setRegenerating(true);
+    setErrorMsg(null);
+    setStatusBanner(null);
+    try {
+      const res = await adminFetch<any>('/api/admin/stock/import/regenerate', {
+        method: 'POST',
+        body: JSON.stringify({
+          syncMode,
+          generateAccounting,
+          cleanPreviousImports: true,
+          tableName: selectedTableName || undefined,
+          mapping: customMapping?.name ? customMapping : undefined,
+          defaultCategoryId: defaultCategoryId ? Number(defaultCategoryId) : null,
+        }),
+      });
+      setCommitResult(res);
+      setStatusBanner(
+        `Fichier ${res.importRecord?.fileName || savedBackupFileName || '.MDF'} régénéré et corrigé avec succès !`,
+      );
+      onRefresh();
+    } catch (err: any) {
+      setErrorMsg(
+        err?.message ||
+          'Veuillez resélectionner votre fichier .MDF dans le Point 1 ci-dessus puis cliquer sur « Sauvegarder & Intégrer maintenant ».',
+      );
+    } finally {
+      setRegenerating(false);
     }
   };
 
@@ -207,6 +370,29 @@ export function MdfIdfBinaryDecoderModule({
     runBinaryDecodePreview(combined.length > 0 ? combined : arr, immediateCommit);
   };
 
+  const handleTableSwitch = (newTable: string) => {
+    setSelectedTableName(newTable);
+    if (allFiles.length > 0) {
+      runBinaryDecodePreview(allFiles, false, newTable);
+    }
+  };
+
+  const handleMappingChange = (fieldKey: string, colName: string) => {
+    const nextMap: Record<string, string> = { ...customMapping, [fieldKey]: colName || '' };
+    setCustomMapping(nextMap);
+    if (allFiles.length > 0 && nextMap.name) {
+      runBinaryDecodePreview(allFiles, false, selectedTableName || preview?.selectedTable, nextMap);
+    }
+  };
+
+  const availableColumns: string[] = Array.isArray(preview?.columns) ? preview.columns : [];
+  const availableTables: { tableName: string; rowCount: number }[] = Array.isArray(preview?.tables)
+    ? preview.tables
+    : [];
+  const previewArticles: any[] = Array.isArray(preview?.diffSummary?.sampleToAdd)
+    ? preview.diffSummary.sampleToAdd.slice(0, 8)
+    : [];
+
   return (
     <div className="bg-white border-2 border-blue-600 rounded-2xl p-5 sm:p-6 shadow-md space-y-5">
       {/* Header Banner */}
@@ -219,20 +405,49 @@ export function MdfIdfBinaryDecoderModule({
             </span>
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-900 text-[11px] font-bold">
               <Database className="w-3.5 h-3.5" />
-              <span>SQL Server 8Ko Pages · UTF-16LE / Latin1 / Int32 · DBase · SQLite · Excel</span>
+              <span>Décodage Exact Pages 8Ko SQL Server · Références, Désignations, Prix d’achat/vente &amp; Quantités</span>
             </span>
           </div>
           <h2 className="font-display font-bold text-base sm:text-lg text-slate-900">
             Ajouter le Stock &amp; Générer toute votre Comptabilité depuis vos fichiers .MDF et .IDF
           </h2>
           <p className="text-xs sm:text-sm text-slate-600">
-            Chargez votre fichier <strong>.MDF</strong> (Point 1) et votre fichier <strong>.IDF</strong> (Point 2) ci-dessous, puis cliquez sur le bouton vert{' '}
-            <strong>« Sauvegarder &amp; Intégrer maintenant dans le système »</strong> pour créer automatiquement tout votre stock et votre comptabilité.
+            Chargez votre fichier <strong>.MDF</strong> (Point 1) et votre fichier <strong>.IDF</strong> (Point 2) ci-dessous : le système retire automatiquement les anciennes lignes mélangées (2 200 DZD / SQL) et restaure les vrais codes, désignations, prix d’achat, prix de vente et quantités.
           </p>
         </div>
 
-        {/* 1-Click Direct Upload & Auto-Integrate Button */}
+        {/* Quick Action Buttons: Clean Corrupted Import + Regenerate + 1-Click Upload */}
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            disabled={cleaningUp || committing}
+            onClick={handleCleanupCorruptedImport}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-sm cursor-pointer transition-colors"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>
+              {cleaningUp
+                ? 'Nettoyage en cours...'
+                : 'Nettoyer l’ancien import erroné (2 200 DZD / SQL)'}
+            </span>
+          </button>
+
+          {(hasSavedBackupOnServer || allFiles.length > 0) && (
+            <button
+              type="button"
+              disabled={regenerating || committing}
+              onClick={handleRegenerateFromServerBackup}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-sm cursor-pointer transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${regenerating ? 'animate-spin' : ''}`} />
+              <span>
+                {regenerating
+                  ? 'Régénération en cours...'
+                  : 'Régénérer & Corriger le fichier envoyé'}
+              </span>
+            </button>
+          )}
+
           <label className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-sm cursor-pointer transition-colors">
             <Sparkles className="w-4 h-4" />
             <span>Sélectionner .MDF + .IDF &amp; Intégrer en 1 Clic</span>
@@ -281,8 +496,8 @@ export function MdfIdfBinaryDecoderModule({
               </p>
               <p className="text-xs text-slate-600 mt-1">
                 {mdfFile
-                  ? `Taille : ${Math.max(1, Math.round(mdfFile.size / 1024))} Ko · Prêt pour le décodage binaire`
-                  : 'Décodage binaire des tables Articles, Produits, Prix d’achat/vente et Écritures comptables'}
+                  ? `Taille : ${Math.max(1, Math.round(mdfFile.size / 1024))} Ko · Pages 8Ko alignées sans perte`
+                  : 'Décodage exact des tables Product, Stock, Prix d’achat (CostPrice), Prix de vente (SellingPrice) & Quantités'}
               </p>
             </div>
           </div>
@@ -340,7 +555,7 @@ export function MdfIdfBinaryDecoderModule({
         </label>
       </div>
 
-      {/* Multi-file dropzone + Category & Auto-Integrate options */}
+      {/* Multi-file dropzone + Category & Sync Mode options */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">
         <label className="lg:col-span-6 flex items-center justify-between gap-3 border border-slate-300 hover:border-blue-600 rounded-xl px-4 py-3 cursor-pointer bg-slate-50/80 transition-colors">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -400,8 +615,8 @@ export function MdfIdfBinaryDecoderModule({
         }`}
       >
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-3">
               <span
                 className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-bold uppercase ${
                   allFiles.length > 0 ? 'bg-emerald-700 text-white' : 'bg-slate-300 text-slate-800'
@@ -410,7 +625,20 @@ export function MdfIdfBinaryDecoderModule({
                 <Save className="w-3.5 h-3.5" />
                 <span>Action d’intégration Base de Données</span>
               </span>
-              <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-950 cursor-pointer ml-1">
+
+              <label className="inline-flex items-center gap-1.5 text-xs font-bold text-red-900 bg-red-100/80 px-2.5 py-1 rounded-lg cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={cleanPreviousImports}
+                  onChange={(e) => setCleanPreviousImports(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded text-red-700"
+                />
+                <span>
+                  Retirer et remplacer l’ancien stock importé erroné (2 200 DZD / SQL)
+                </span>
+              </label>
+
+              <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-950 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={generateAccounting}
@@ -419,7 +647,8 @@ export function MdfIdfBinaryDecoderModule({
                 />
                 <span>Générer aussi toute la Comptabilité (Bilan, Achats, Ventes, Marges)</span>
               </label>
-              <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-900 cursor-pointer ml-2">
+
+              <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-900 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={autoIntegrateOnSelect}
@@ -432,7 +661,7 @@ export function MdfIdfBinaryDecoderModule({
 
             <p className="text-sm font-bold text-slate-900">
               {parsing
-                ? 'Décodage binaire des pages .MDF / .IDF en cours...'
+                ? 'Décodage binaire des pages 8Ko .MDF / .IDF en cours...'
                 : allFiles.length > 0
                 ? `Prêt à sauvegarder : ${allFiles.map((f) => f.name).join(' + ')}${
                     preview
@@ -444,6 +673,8 @@ export function MdfIdfBinaryDecoderModule({
                         } écriture(s) Compta décodés`
                       : ''
                   }`
+                : hasSavedBackupOnServer
+                ? `Sauvegarde détectée (${savedBackupFileName}) : cliquez sur « Régénérer & Corriger le fichier envoyé » ou chargez un nouveau .MDF`
                 : 'Étape 1 : Choisissez votre fichier .MDF et/ou .IDF ci-dessus · Étape 2 : Cliquez sur le bouton vert à droite'}
             </p>
           </div>
@@ -454,7 +685,7 @@ export function MdfIdfBinaryDecoderModule({
                 <button
                   type="button"
                   disabled={parsing || committing}
-                  onClick={() => runBinaryDecodePreview(allFiles, false)}
+                  onClick={() => runBinaryDecodePreview(allFiles, false, selectedTableName || undefined)}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${parsing ? 'animate-spin' : ''}`} />
@@ -479,10 +710,10 @@ export function MdfIdfBinaryDecoderModule({
 
             <button
               type="button"
-              disabled={allFiles.length === 0 || committing}
+              disabled={(allFiles.length === 0 && !hasSavedBackupOnServer) || committing}
               onClick={() => executeCommit()}
               className={`inline-flex items-center gap-2 px-5 py-3 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-all ${
-                allFiles.length > 0
+                allFiles.length > 0 || hasSavedBackupOnServer
                   ? 'bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer ring-2 ring-emerald-400/50'
                   : 'bg-slate-300 text-slate-500 cursor-not-allowed'
               }`}
@@ -498,6 +729,13 @@ export function MdfIdfBinaryDecoderModule({
         </div>
       </div>
 
+      {/* Status Banner */}
+      {statusBanner && (
+        <div className="p-4 rounded-xl bg-blue-50 border border-blue-200 text-xs sm:text-sm text-blue-900 font-semibold">
+          {statusBanner}
+        </div>
+      )}
+
       {/* Error Message */}
       {errorMsg && (
         <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-xs sm:text-sm text-red-700 font-medium">
@@ -512,9 +750,14 @@ export function MdfIdfBinaryDecoderModule({
             <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
             <div>
               <p className="text-sm font-bold text-emerald-950">
-                Base de données .MDF / .IDF intégrée avec succès dans votre système !
+                Base de données .MDF / .IDF intégrée et corrigée avec succès dans votre système !
               </p>
               <p className="text-xs text-emerald-900 mt-1">
+                {commitResult.purgedOldProductsCount ? (
+                  <>
+                    <strong>{commitResult.purgedOldProductsCount}</strong> anciennes lignes erronées supprimées ·{' '}
+                  </>
+                ) : null}
                 <strong>+{commitResult.importRecord?.addedCount ?? 0}</strong> nouveaux articles créés ·{' '}
                 <strong>{commitResult.importRecord?.updatedCount ?? 0}</strong> articles mis à jour ·{' '}
                 <strong>+{commitResult.accountingGeneratedCount ?? 0}</strong> écritures comptables générées dans la Compta.
@@ -546,9 +789,9 @@ export function MdfIdfBinaryDecoderModule({
         </div>
       )}
 
-      {/* Compact Decoded Preview Summary */}
+      {/* Interactive Table & Column Mapping + Decoded Preview Table */}
       {preview && (
-        <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+        <div className="p-4 sm:p-5 rounded-xl bg-slate-50 border border-slate-200 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className="px-2.5 py-1 rounded bg-blue-100 text-blue-900 text-xs font-bold">
@@ -593,6 +836,175 @@ export function MdfIdfBinaryDecoderModule({
               </span>
             </button>
           </div>
+
+          {/* Interactive SQL Server Table & Column Selector */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-2.5 pt-2 border-t border-slate-200">
+            {availableTables.length > 1 && (
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Table SQL (.MDF)
+                </label>
+                <select
+                  value={selectedTableName || preview.selectedTable || ''}
+                  onChange={(e) => handleTableSwitch(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-blue-300 bg-white font-semibold text-slate-900"
+                >
+                  {availableTables.map((t) => (
+                    <option key={t.tableName} value={t.tableName}>
+                      {t.tableName} ({t.rowCount} lignes)
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Référence / Code
+              </label>
+              <select
+                value={customMapping?.sku || ''}
+                onChange={(e) => handleMappingChange('sku', e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 bg-white text-slate-800"
+              >
+                <option value="">Auto (Code article)</option>
+                {availableColumns.map((col) => (
+                  <option key={col} value={col}>
+                    {col}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Désignation / Nom *
+              </label>
+              <select
+                value={customMapping?.name || ''}
+                onChange={(e) => handleMappingChange('name', e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-blue-400 bg-white font-semibold text-slate-900"
+              >
+                {availableColumns.map((col) => (
+                  <option key={col} value={col}>
+                    {col}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Prix d’achat (DZD)
+              </label>
+              <select
+                value={customMapping?.costPriceDzd || ''}
+                onChange={(e) => handleMappingChange('costPriceDzd', e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 bg-white text-slate-800"
+              >
+                <option value="">0 DZD / Non défini</option>
+                {availableColumns.map((col) => (
+                  <option key={col} value={col}>
+                    {col}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Prix de vente (DZD)
+              </label>
+              <select
+                value={customMapping?.priceDzd || ''}
+                onChange={(e) => handleMappingChange('priceDzd', e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 bg-white text-slate-800"
+              >
+                <option value="">0 DZD / Non défini</option>
+                {availableColumns.map((col) => (
+                  <option key={col} value={col}>
+                    {col}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Quantité en stock
+              </label>
+              <select
+                value={customMapping?.stockQuantity || ''}
+                onChange={(e) => handleMappingChange('stockQuantity', e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 bg-white text-slate-800"
+              >
+                <option value="">0 / Non défini</option>
+                {availableColumns.map((col) => (
+                  <option key={col} value={col}>
+                    {col}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Catégorie / Famille
+              </label>
+              <select
+                value={customMapping?.categoryName || ''}
+                onChange={(e) => handleMappingChange('categoryName', e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 bg-white text-slate-800"
+              >
+                <option value="">Auto / Par défaut</option>
+                {availableColumns.map((col) => (
+                  <option key={col} value={col}>
+                    {col}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Decoded Articles Verification Table */}
+          {previewArticles.length > 0 && (
+            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-100 text-slate-700 border-b border-slate-200 font-bold">
+                    <th className="py-2 px-3">Référence (Code)</th>
+                    <th className="py-2 px-3">Désignation de l’article</th>
+                    <th className="py-2 px-3 text-right">Prix d’achat</th>
+                    <th className="py-2 px-3 text-right">Prix de vente</th>
+                    <th className="py-2 px-3 text-right">Quantité</th>
+                    <th className="py-2 px-3">Catégorie</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {previewArticles.map((art: any, idx: number) => (
+                    <tr key={idx} className="hover:bg-slate-50">
+                      <td className="py-2 px-3 font-mono font-semibold text-blue-800">
+                        {art.sku || `ART-${idx + 1}`}
+                      </td>
+                      <td className="py-2 px-3 font-semibold text-slate-900">{art.name}</td>
+                      <td className="py-2 px-3 text-right text-slate-700">
+                        {formatDzd(art.costPriceDzd || 0)}
+                      </td>
+                      <td className="py-2 px-3 text-right font-bold text-emerald-800">
+                        {formatDzd(art.priceDzd || 0)}
+                      </td>
+                      <td className="py-2 px-3 text-right font-bold text-slate-900">
+                        {art.stockQuantity ?? 0} u.
+                      </td>
+                      <td className="py-2 px-3 text-slate-600">
+                        {art.categoryName || 'Non classé'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>
