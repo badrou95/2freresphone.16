@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   BarChart3,
   Boxes,
+  Database,
   Globe,
   KeyRound,
   LayoutDashboard,
@@ -58,6 +59,7 @@ type AdminTab =
   | 'sales'
   | 'products'
   | 'stock'
+  | 'mdf_import'
   | 'customers'
   | 'reviews'
   | 'carriers'
@@ -75,12 +77,30 @@ export function AdminShell({
   onStoreSettingsChanged,
 }: AdminShellProps) {
   const { user, admin, loading, authError, signInWithGoogle, signOut } = useAuth();
-  const [activeTab, setActiveTab] = useState<AdminTab>('overview');
+  const [activeTab, setActiveTab] = useState<AdminTab>(() => {
+    try {
+      const saved = localStorage.getItem('2fp_admin_active_tab') as AdminTab | null;
+      if (saved) return saved;
+    } catch {
+      // ignore
+    }
+    return 'overview';
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Contextual sub-navigation flags
   const [productsOnlyMissingPhotos, setProductsOnlyMissingPhotos] = useState(false);
-  const [stockInitialSubTab, setStockInitialSubTab] = useState<'import' | 'levels' | 'compta' | 'alerts'>('levels');
+  const [stockInitialSubTab, setStockInitialSubTab] = useState<'import' | 'levels' | 'compta' | 'alerts'>(() => {
+    try {
+      const saved = localStorage.getItem('2fp_admin_stock_subtab');
+      if (saved === 'import' || saved === 'levels' || saved === 'compta' || saved === 'alerts') {
+        return saved;
+      }
+    } catch {
+      // ignore
+    }
+    return 'import';
+  });
 
   // Admin datasets loaded from real PostgreSQL APIs
   const [loadingData, setLoadingData] = useState(false);
@@ -183,8 +203,31 @@ export function AdminShell({
     if (tab === 'products') {
       setProductsOnlyMissingPhotos(Boolean(extra?.onlyMissingPhotos));
     }
+    if (tab === 'mdf_import') {
+      setStockInitialSubTab('import');
+      try {
+        localStorage.setItem('2fp_admin_stock_subtab', 'import');
+        localStorage.setItem('2fp_admin_active_tab', 'mdf_import');
+      } catch {
+        // ignore
+      }
+      setActiveTab('mdf_import');
+      setSidebarOpen(false);
+      return;
+    }
     if (tab === 'stock') {
-      setStockInitialSubTab(extra?.subTab || 'levels');
+      const nextSub = extra?.subTab || 'import';
+      setStockInitialSubTab(nextSub);
+      try {
+        localStorage.setItem('2fp_admin_stock_subtab', nextSub);
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      localStorage.setItem('2fp_admin_active_tab', tab);
+    } catch {
+      // ignore
     }
     setActiveTab(tab as AdminTab);
     setSidebarOpen(false);
@@ -280,19 +323,25 @@ export function AdminShell({
 
   const navGroups: {
     title: string;
-    items: { id: AdminTab; label: string; icon: React.ComponentType<{ className?: string }>; badge?: number }[];
+    items: { id: AdminTab; label: string; icon: React.ComponentType<{ className?: string }>; badge?: number | string }[];
   }[] = [
     {
       title: 'Pilotage',
       items: [
         { id: 'overview', label: 'Vue générale', icon: LayoutDashboard },
         { id: 'orders', label: 'Commandes', icon: ShoppingCart, badge: dashboard?.kpis?.newOrders || undefined },
-        { id: 'sales', label: 'Ventes', icon: BarChart3 },
+        { id: 'sales', label: 'Ventes & Compta', icon: BarChart3 },
       ],
     },
     {
       title: 'Catalogue & Stocks',
       items: [
+        {
+          id: 'mdf_import',
+          label: 'Sauvegarde .MDF + .IDF',
+          icon: Database,
+          badge: 'MDF/IDF',
+        },
         { id: 'products', label: 'Produits & Catégories', icon: Package },
         {
           id: 'stock',
@@ -384,7 +433,11 @@ export function AdminShell({
                     {item.badge ? (
                       <span
                         className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold tabular-nums ${
-                          active ? 'bg-white/20 text-white' : 'bg-red-600 text-white'
+                          active
+                            ? 'bg-white/20 text-white'
+                            : item.badge === 'MDF/IDF'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-red-600 text-white'
                         }`}
                       >
                         {item.badge}
@@ -457,6 +510,14 @@ export function AdminShell({
           <div className="flex items-center gap-2">
             <button
               type="button"
+              onClick={() => handleNavigateTab('mdf_import')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-sm"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>Sauvegarde .MDF + .IDF</span>
+            </button>
+            <button
+              type="button"
               onClick={handleRefresh}
               disabled={loadingData}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700"
@@ -495,7 +556,7 @@ export function AdminShell({
               orders={orders}
               accountingEntries={stockData?.accountingEntries || []}
               storeSettings={settingsData?.settings || publicSettings}
-              onOpenMdfImport={() => handleNavigateTab('stock', { subTab: 'import' })}
+              onOpenMdfImport={() => handleNavigateTab('mdf_import')}
             />
           )}
           {activeTab === 'products' && (
@@ -509,14 +570,14 @@ export function AdminShell({
               onRefresh={handleRefresh}
             />
           )}
-          {activeTab === 'stock' && (
+          {(activeTab === 'stock' || activeTab === 'mdf_import') && (
             <AdminStockImport
-              key={stockInitialSubTab}
+              key={activeTab === 'mdf_import' ? 'import' : stockInitialSubTab}
               products={products}
               categories={categories}
               stockData={stockData}
               storeSettings={settingsData?.settings || publicSettings}
-              initialSubTab={stockInitialSubTab}
+              initialSubTab={activeTab === 'mdf_import' ? 'import' : stockInitialSubTab}
               onRefresh={handleRefresh}
               onGoToMissingPhotos={() => handleNavigateTab('products', { onlyMissingPhotos: true })}
             />

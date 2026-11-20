@@ -48,16 +48,89 @@ const MAPPING_FIELDS: { key: string; label: string; required?: boolean }[] = [
   { key: 'description', label: 'Description' },
 ];
 
+/**
+ * Compacts large binary database files (.mdf, .idf, .ldf, .ndf, .bak, .dbf) in the browser
+ * by collapsing long empty zero-byte (0x00) allocation runs so even 100MB+ .MDF/.IDF files
+ * upload rapidly without hitting serverless payload limits.
+ */
+async function compactDatabaseFileForUpload(file: File): Promise<File> {
+  const isBinaryDbExt = /\.(mdf|idf|ldf|ndf|idx|ndx|bak|dat|dbf|fic)$/i.test(file.name);
+  if (!isBinaryDbExt && file.size <= 2.5 * 1024 * 1024) {
+    return file;
+  }
+  if (file.size <= 1.5 * 1024 * 1024) {
+    return file;
+  }
+  try {
+    const sliceLimit = Math.min(file.size, 60 * 1024 * 1024);
+    const ab = await file.slice(0, sliceLimit).arrayBuffer();
+    const src = new Uint8Array(ab);
+    // Keep SQLite / ZIP / OLE2 headers intact if smaller than 3.5MB
+    if (
+      file.size <= 3.5 * 1024 * 1024 &&
+      src.length >= 4 &&
+      ((src[0] === 0x50 && src[1] === 0x4b) || (src[0] === 0xd0 && src[1] === 0xcf) || src[0] === 0x53)
+    ) {
+      return file;
+    }
+    const maxOut = 2.2 * 1024 * 1024;
+    const out = new Uint8Array(Math.min(src.length, maxOut));
+    let outIdx = 0;
+    let zeroRun = 0;
+    for (let i = 0; i < src.length && outIdx < maxOut; i++) {
+      const b = src[i];
+      if (b === 0) {
+        zeroRun++;
+        if (zeroRun <= 4) {
+          out[outIdx++] = 0;
+        }
+      } else {
+        zeroRun = 0;
+        out[outIdx++] = b;
+      }
+    }
+    const compactedBlob = new Blob([out.subarray(0, outIdx)], {
+      type: file.type || 'application/octet-stream',
+    });
+    return new File([compactedBlob], file.name, {
+      type: file.type || 'application/octet-stream',
+      lastModified: file.lastModified,
+    });
+  } catch {
+    return file;
+  }
+}
+
 export function AdminStockImport({
   products,
   categories,
   stockData,
   storeSettings = {},
-  initialSubTab = 'levels',
+  initialSubTab = 'import',
   onRefresh,
   onGoToMissingPhotos,
 }: AdminStockImportProps) {
-  const [subTab, setSubTab] = useState<'import' | 'levels' | 'compta' | 'alerts'>(initialSubTab);
+  const [subTab, setSubTab] = useState<'import' | 'levels' | 'compta' | 'alerts'>(() => {
+    if (initialSubTab) return initialSubTab;
+    try {
+      const saved = localStorage.getItem('2fp_admin_stock_subtab');
+      if (saved === 'import' || saved === 'levels' || saved === 'compta' || saved === 'alerts') {
+        return saved;
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return 'import';
+  });
+
+  const handleChangeSubTab = (next: 'import' | 'levels' | 'compta' | 'alerts') => {
+    setSubTab(next);
+    try {
+      localStorage.setItem('2fp_admin_stock_subtab', next);
+    } catch {
+      // ignore
+    }
+  };
 
   // Dual .MDF + .IDF and Universal Stock/Compta Database Import State
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -106,8 +179,9 @@ export function AdminStockImport({
     setImportError(null);
     setCommitResult(null);
     try {
+      const preparedFiles = await Promise.all(filesToAnalyze.map((f) => compactDatabaseFileForUpload(f)));
       const fd = new FormData();
-      filesToAnalyze.forEach((f) => fd.append('files', f));
+      preparedFiles.forEach((f) => fd.append('files', f));
       fd.append('syncMode', opts?.mode || syncMode);
       if (opts?.tableName) fd.append('tableName', opts.tableName);
       if (opts?.customMapping && opts.customMapping.name) {
@@ -169,15 +243,19 @@ export function AdminStockImport({
   };
 
   const handleCommitImport = async () => {
-    if (selectedFiles.length === 0 || !preview) return;
+    if (selectedFiles.length === 0) {
+      setImportError('Veuillez d’abord sélectionner votre fichier .MDF ou .IDF.');
+      return;
+    }
     setCommitting(true);
     setImportError(null);
     try {
+      const preparedFiles = await Promise.all(selectedFiles.map((f) => compactDatabaseFileForUpload(f)));
       const fd = new FormData();
-      selectedFiles.forEach((f) => fd.append('files', f));
+      preparedFiles.forEach((f) => fd.append('files', f));
       fd.append('syncMode', syncMode);
-      fd.append('tableName', selectedTable);
-      fd.append('mappingJson', JSON.stringify(mapping));
+      if (selectedTable) fd.append('tableName', selectedTable);
+      if (mapping && mapping.name) fd.append('mappingJson', JSON.stringify(mapping));
       fd.append('generateAccounting', generateAccounting ? 'true' : 'false');
       if (defaultCategoryId) fd.append('defaultCategoryId', defaultCategoryId);
       if (saveProfileName.trim()) fd.append('saveProfileName', saveProfileName.trim());
@@ -449,45 +527,49 @@ export function AdminStockImport({
 
   return (
     <div className="space-y-5">
-      <div className="inline-flex flex-wrap p-1 bg-slate-200/70 rounded-lg gap-1">
+      <div className="inline-flex flex-wrap p-1.5 bg-slate-200/80 rounded-xl gap-1.5">
         <button
           type="button"
-          onClick={() => setSubTab('levels')}
-          className={`px-4 py-1.5 rounded-md text-xs font-semibold ${
-            subTab === 'levels' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
-          }`}
-        >
-          Gestion &amp; Niveaux de stock ({physicalProducts.length})
-        </button>
-        <button
-          type="button"
-          onClick={() => setSubTab('import')}
-          className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-semibold ${
-            subTab === 'import' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600'
+          onClick={() => handleChangeSubTab('import')}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+            subTab === 'import'
+              ? 'bg-blue-700 text-white shadow-sm'
+              : 'bg-white/60 text-blue-900 hover:bg-white'
           }`}
         >
           <Database className="w-3.5 h-3.5" />
-          <span>Importer Sauvegarde (.MDF + .IDF / Stock &amp; Compta)</span>
+          <span>1. Importer Sauvegarde (.MDF + .IDF / Stock &amp; Compta)</span>
         </button>
         <button
           type="button"
-          onClick={() => setSubTab('compta')}
-          className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-semibold ${
-            subTab === 'compta' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600'
+          onClick={() => handleChangeSubTab('levels')}
+          className={`px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+            subTab === 'levels' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-700 hover:bg-white/60'
           }`}
         >
-          <Calculator className="w-3.5 h-3.5 text-emerald-600" />
-          <span>Comptabilité &amp; Bilan ({accountingEntriesList.length})</span>
+          2. Gestion &amp; Niveaux de stock ({physicalProducts.length})
         </button>
         <button
           type="button"
-          onClick={() => setSubTab('alerts')}
-          className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-semibold ${
-            subTab === 'alerts' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+          onClick={() => handleChangeSubTab('compta')}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+            subTab === 'compta'
+              ? 'bg-emerald-700 text-white shadow-sm'
+              : 'text-emerald-900 bg-white/60 hover:bg-white'
+          }`}
+        >
+          <Calculator className="w-3.5 h-3.5" />
+          <span>3. Comptabilité &amp; Bilan ({accountingEntriesList.length})</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleChangeSubTab('alerts')}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+            subTab === 'alerts' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-700 hover:bg-white/60'
           }`}
         >
           <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
-          <span>Alertes stock faible ({activeAlerts.length})</span>
+          <span>4. Alertes stock faible ({activeAlerts.length})</span>
         </button>
       </div>
 
@@ -505,11 +587,10 @@ export function AdminStockImport({
                   Importez vos deux fichiers de sauvegarde (.MDF et .IDF) pour générer tout votre stock et votre compta
                 </h2>
                 <p className="text-sm text-slate-600 mt-1">
-                  Chargez votre fichier principal <strong>.mdf</strong> ainsi que votre fichier d’index/données{' '}
-                  <strong>.idf</strong> (ou tout autre fichier de sauvegarde : <code>.dbf</code>, <code>.bak</code>,{' '}
-                  <code>.sql</code>, <code>.sqlite</code>, <code>.xlsx</code>, <code>.csv</code>). Le système fusionne
-                  les tables, crée vos produits en stock avec prix d’achat et prix de vente, et génère automatiquement
-                  toute votre comptabilité.
+                  Chargez votre fichier principal <strong>.mdf</strong> (Point 1) ainsi que votre fichier d’index/données{' '}
+                  <strong>.idf</strong> (Point 2), puis cliquez sur le bouton vert{' '}
+                  <strong>« Sauvegarder &amp; Intégrer maintenant dans le système »</strong> juste en dessous pour générer
+                  votre stock et votre comptabilité.
                 </p>
               </div>
             </div>
@@ -537,11 +618,11 @@ export function AdminStockImport({
                       Point 1 · Fichier Base de Données (.MDF)
                     </span>
                     <p className="font-display font-bold text-sm text-slate-900 mt-0.5 truncate">
-                      {mdfFile ? mdfFile.name : 'Sélectionner votre fichier .MDF'}
+                      {mdfFile ? mdfFile.name : 'Cliquez ici pour choisir votre fichier .MDF'}
                     </p>
                     <p className="text-xs text-slate-500 mt-1">
                       {mdfFile
-                        ? `Chargé (${Math.max(1, Math.round(mdfFile.size / 1024))} Ko) · Cliquez pour remplacer`
+                        ? `Fichier chargé (${Math.max(1, Math.round(mdfFile.size / 1024))} Ko) · Cliquez pour remplacer`
                         : 'Contient les tables principales (Articles, Stock, Prix d’achat/vente, Ventes & Compta)'}
                     </p>
                   </div>
@@ -575,11 +656,11 @@ export function AdminStockImport({
                       Point 2 · Fichier Index &amp; Inventaire (.IDF)
                     </span>
                     <p className="font-display font-bold text-sm text-slate-900 mt-0.5 truncate">
-                      {idfFile ? idfFile.name : 'Sélectionner votre fichier .IDF'}
+                      {idfFile ? idfFile.name : 'Cliquez ici pour choisir votre fichier .IDF'}
                     </p>
                     <p className="text-xs text-slate-500 mt-1">
                       {idfFile
-                        ? `Chargé (${Math.max(1, Math.round(idfFile.size / 1024))} Ko) · Cliquez pour remplacer`
+                        ? `Fichier chargé (${Math.max(1, Math.round(idfFile.size / 1024))} Ko) · Cliquez pour remplacer`
                         : 'Contient les index, quantités en stock, mouvements et journaux associés (.idf, .ldf, .idx)'}
                     </p>
                   </div>
@@ -599,9 +680,9 @@ export function AdminStockImport({
                 <FileSpreadsheet className="w-4 h-4 text-blue-700" />
                 <span>
                   {parsing
-                    ? 'Analyse et fusion des fichiers de sauvegarde en cours...'
+                    ? 'Lecture et analyse de vos fichiers .MDF / .IDF en cours...'
                     : selectedFiles.length > 0
-                    ? `Fichier(s) prêt(s) : ${selectedFiles.map((f) => f.name).join(' + ')}`
+                    ? `Fichier(s) chargé(s) : ${selectedFiles.map((f) => f.name).join(' + ')}`
                     : 'Ou cliquez ici pour sélectionner vos deux fichiers (.mdf + .idf) en même temps'}
                 </span>
               </div>
@@ -616,6 +697,98 @@ export function AdminStockImport({
                 className="hidden"
               />
             </label>
+
+            {/* ALWAYS-VISIBLE SAVE & INTEGRATE ACTION BAR (NO SCROLLING NEEDED) */}
+            <div
+              className={`p-5 rounded-xl border-2 transition-all ${
+                selectedFiles.length > 0
+                  ? 'bg-emerald-50/90 border-emerald-500 shadow-md'
+                  : 'bg-slate-50 border-slate-200'
+              }`}
+            >
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-bold uppercase ${
+                        selectedFiles.length > 0
+                          ? 'bg-emerald-700 text-white'
+                          : 'bg-slate-200 text-slate-700'
+                      }`}
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      <span>Étape Finale · Sauvegarder &amp; Intégrer dans le système</span>
+                    </span>
+                    {parsing && (
+                      <span className="text-xs font-semibold text-blue-700 animate-pulse">
+                        Analyse en cours...
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm font-bold text-slate-900">
+                    {selectedFiles.length > 0
+                      ? `Prêt à intégrer : ${selectedFiles.map((f) => f.name).join(' + ')}${
+                          preview
+                            ? ` (${preview.diffSummary.toAddCount + preview.diffSummary.toUpdateCount} article(s) Stock + ${preview.accountingPreview?.totalEntries ?? 0} écriture(s) Compta détectés)`
+                            : ''
+                        }`
+                      : 'Sélectionnez votre fichier .MDF (Point 1) et/ou votre fichier .IDF (Point 2) ci-dessus, puis cliquez sur le bouton à droite pour tout enregistrer.'}
+                  </p>
+                  <p className="text-xs text-slate-600">
+                    Cette action enregistre automatiquement tous les produits dans votre stock (quantités, prix d’achat, prix de vente) et génère toute votre comptabilité dans la base de données.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                  {selectedFiles.length > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={parsing || committing}
+                        onClick={() => runPreview(selectedFiles)}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${parsing ? 'animate-spin' : ''}`} />
+                        <span>{parsing ? 'Analyse...' : 'Analyser / Aperçu'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={committing}
+                        onClick={() => {
+                          setPreview(null);
+                          setSelectedFiles([]);
+                          setMdfFile(null);
+                          setIdfFile(null);
+                          setImportError(null);
+                        }}
+                        className="px-3 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-600"
+                      >
+                        Vider
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    disabled={selectedFiles.length === 0 || committing}
+                    onClick={handleCommitImport}
+                    className={`inline-flex items-center gap-2 px-5 py-3 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-all ${
+                      selectedFiles.length > 0
+                        ? 'bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer'
+                        : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                    }`}
+                  >
+                    <Upload className="w-4 h-4" />
+                    <span>
+                      {committing
+                        ? 'Intégration du Stock & de la Compta en cours...'
+                        : selectedFiles.length > 0
+                        ? 'Sauvegarder & Intégrer maintenant (Générer Stock + Compta)'
+                        : 'Sauvegarder & Intégrer dans le système'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
 
             {/* Sync Mode & Accounting Generation Checkbox */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -702,9 +875,9 @@ export function AdminStockImport({
             )}
 
             {commitResult && (
-              <div className="p-5 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="p-5 rounded-xl bg-emerald-50 border-2 border-emerald-500 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
                 <div className="flex items-start gap-3">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                  <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
                   <div>
                     <p className="text-sm font-bold text-emerald-950">
                       Sauvegarde intégrée avec succès : {commitResult.importRecord.addedCount} nouveau(x) article(s) ajouté(s),{' '}
@@ -712,14 +885,14 @@ export function AdminStockImport({
                       {commitResult.accountingGeneratedCount ?? 0} écriture(s) comptable(s) générée(s) dans votre Compta !
                     </p>
                     <p className="text-xs text-emerald-800 mt-1">
-                      Votre stock et votre bilan comptable sont maintenant prêts et synchronisés.
+                      Votre stock et votre bilan comptable sont maintenant enregistrés dans PostgreSQL.
                     </p>
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    onClick={() => setSubTab('compta')}
+                    onClick={() => handleChangeSubTab('compta')}
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold whitespace-nowrap shadow-sm"
                   >
                     <Calculator className="w-3.5 h-3.5" />
@@ -727,7 +900,7 @@ export function AdminStockImport({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSubTab('levels')}
+                    onClick={() => handleChangeSubTab('levels')}
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-emerald-700 bg-white hover:bg-emerald-100 text-emerald-900 text-xs font-semibold whitespace-nowrap"
                   >
                     <span>Voir mon Stock &amp; Marges</span>
@@ -752,32 +925,48 @@ export function AdminStockImport({
               <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-100">
                 <div>
                   <h3 className="font-display font-bold text-base text-slate-900">
-                    Aperçu Stock &amp; Comptabilité — {preview.fileName} ({preview.format.toUpperCase()})
+                    Aperçu détaillé Stock &amp; Comptabilité — {preview.fileName} ({preview.format.toUpperCase()})
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
                     {preview.totalRows} ligne(s) détectée(s) dans « {preview.selectedTable} »
                   </p>
                 </div>
 
-                {preview.tables && preview.tables.length > 1 && (
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs font-semibold text-slate-700">Table / Fichier :</label>
-                    <select
-                      value={selectedTable}
-                      onChange={(e) => {
-                        setSelectedTable(e.target.value);
-                        if (selectedFiles.length > 0) runPreview(selectedFiles, { tableName: e.target.value });
-                      }}
-                      className="px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-white"
-                    >
-                      {preview.tables.map((t: any) => (
-                        <option key={t.tableName} value={t.tableName}>
-                          {t.tableName} ({t.rowCount} lignes)
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {preview.tables && preview.tables.length > 1 && (
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-semibold text-slate-700">Table / Fichier :</label>
+                      <select
+                        value={selectedTable}
+                        onChange={(e) => {
+                          setSelectedTable(e.target.value);
+                          if (selectedFiles.length > 0) runPreview(selectedFiles, { tableName: e.target.value });
+                        }}
+                        className="px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-white"
+                      >
+                        {preview.tables.map((t: any) => (
+                          <option key={t.tableName} value={t.tableName}>
+                            {t.tableName} ({t.rowCount} lignes)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={committing}
+                    onClick={handleCommitImport}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-sm"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>
+                      {committing
+                        ? 'Intégration en cours...'
+                        : `Sauvegarder & Intégrer (+${preview.diffSummary.toAddCount + preview.diffSummary.toUpdateCount} Stock / +${preview.accountingPreview?.totalEntries ?? 0} Compta)`}
+                    </span>
+                  </button>
+                </div>
               </div>
 
               {/* Differential Summary Counters */}
@@ -988,20 +1177,15 @@ export function AdminStockImport({
                 </button>
                 <button
                   type="button"
-                  disabled={
-                    committing ||
-                    (preview.diffSummary.toAddCount === 0 &&
-                      preview.diffSummary.toUpdateCount === 0 &&
-                      (preview.accountingPreview?.totalEntries || 0) === 0)
-                  }
+                  disabled={committing}
                   onClick={handleCommitImport}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 text-white text-xs font-semibold shadow-sm"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 text-white text-xs font-bold shadow-sm"
                 >
                   <Upload className="w-4 h-4" />
                   <span>
                     {committing
                       ? 'Génération du Stock & de la Compta en cours...'
-                      : `Générer le Stock (+${preview.diffSummary.toAddCount + preview.diffSummary.toUpdateCount}) & Toute la Compta (+${preview.accountingPreview?.totalEntries ?? 0})`}
+                      : `Sauvegarder & Intégrer le Stock (+${preview.diffSummary.toAddCount + preview.diffSummary.toUpdateCount}) & Toute la Compta (+${preview.accountingPreview?.totalEntries ?? 0})`}
                   </span>
                 </button>
               </div>
@@ -1336,6 +1520,39 @@ export function AdminStockImport({
 
       {subTab === 'levels' && (
         <div className="space-y-4">
+          {/* Quick Shortcut Banner to .MDF + .IDF Backup Importer */}
+          <div className="bg-blue-50/80 border border-blue-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <Database className="w-5 h-5 text-blue-700 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-bold text-slate-900">
+                  Intégration Sauvegarde .MDF + .IDF (Générer tout votre Stock &amp; votre Comptabilité)
+                </p>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Importez vos deux fichiers <strong>.mdf</strong> et <strong>.idf</strong> en un clic pour créer vos articles, quantités, prix d’achat/vente et votre bilan comptable.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleChangeSubTab('import')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-sm"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Importer mes fichiers .MDF + .IDF</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleChangeSubTab('compta')}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-emerald-700 bg-white hover:bg-emerald-50 text-emerald-800 text-xs font-semibold"
+              >
+                <Calculator className="w-3.5 h-3.5" />
+                <span>Voir ma Compta ({accountingEntriesList.length})</span>
+              </button>
+            </div>
+          </div>
+
           {stockFeedback && (
             <div
               className={`p-3 rounded-xl border text-xs font-medium flex items-center justify-between gap-2 ${

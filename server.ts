@@ -2120,7 +2120,7 @@ export function createApp() {
         return res.status(400).json({ error: 'Veuillez sélectionner votre fichier (ou vos deux fichiers .mdf et .idf).' });
       }
       const preferredTable = req.body.tableName ? String(req.body.tableName) : undefined;
-      const syncMode = (req.body.syncMode || 'add_only') as StockSyncMode;
+      const syncMode = (req.body.syncMode || 'full_sync') as StockSyncMode;
       const customMapping: ColumnMapping | null = req.body.mappingJson
         ? JSON.parse(String(req.body.mappingJson))
         : null;
@@ -2234,7 +2234,7 @@ export function createApp() {
         return res.status(400).json({ error: 'Fichier(s) de sauvegarde manquant(s).' });
       }
       const preferredTable = req.body.tableName ? String(req.body.tableName) : undefined;
-      const syncMode = (req.body.syncMode || 'add_only') as StockSyncMode;
+      const syncMode = (req.body.syncMode || 'full_sync') as StockSyncMode;
       const mapping: ColumnMapping = req.body.mappingJson
         ? JSON.parse(String(req.body.mappingJson))
         : { name: '' };
@@ -2302,7 +2302,7 @@ export function createApp() {
               .insert(categories)
               .values({
                 name: item.categoryName,
-                slug: `${catSlug}-${Date.now().toString(36).slice(-3)}`,
+                slug: `${catSlug}-${Date.now().toString(36).slice(-3)}-${item.rowIndex}`,
                 categoryGroup: item.productType === 'digital' ? 'digital' : 'accessories',
                 sortOrder: 99,
                 isActive: true,
@@ -2316,9 +2316,9 @@ export function createApp() {
           }
         }
 
-        const uniqueSlug = `${slugify(item.name)}-${Date.now().toString(36).slice(-4)}-${item.rowIndex}`;
+        const uniqueSlug = `${slugify(item.name)}-${importRecord.id}-${item.rowIndex}`;
         const safeSku = `${item.sku}`;
-        const [inserted] = await db
+        let [inserted] = await db
           .insert(products)
           .values({
             categoryId: resolvedCatId,
@@ -2340,6 +2340,33 @@ export function createApp() {
           })
           .onConflictDoNothing()
           .returning();
+
+        // Fallback if SKU collided with an existing record
+        if (!inserted) {
+          const fallbackSku = `${safeSku}-${importRecord.id}-${item.rowIndex}`;
+          [inserted] = await db
+            .insert(products)
+            .values({
+              categoryId: resolvedCatId,
+              sku: fallbackSku,
+              barcode: item.barcode,
+              externalRef: item.externalRef,
+              name: item.name,
+              slug: `${uniqueSlug}-alt`,
+              brand: item.brand,
+              shortDescription: item.description ? item.description.slice(0, 160) : null,
+              description: item.description || '',
+              productType: item.productType,
+              priceDzd: item.priceDzd,
+              costPriceDzd: item.costPriceDzd,
+              stockQuantity: item.stockQuantity,
+              lowStockThreshold: item.lowStockThreshold,
+              isFeatured: false,
+              isActive: true,
+            })
+            .onConflictDoNothing()
+            .returning();
+        }
 
         if (inserted) {
           addedCount += 1;
