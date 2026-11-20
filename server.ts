@@ -4,6 +4,7 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { GoogleGenAI, Type } from '@google/genai';
 import { db, hasDatabaseConfig } from './src/db/index.ts';
 import {
   adminUsers,
@@ -12,6 +13,7 @@ import {
   customers,
   digitalDeliveries,
   importMappingProfiles,
+  landingPages,
   mediaAssets,
   orderItems,
   orders,
@@ -618,44 +620,86 @@ export function createApp() {
         });
       }
 
-      // Validate items & stock
-      const productIds = items.map((i: any) => Number(i.productId)).filter(Number.isInteger);
-      const dbProducts = await db
-        .select()
-        .from(products)
-        .where(inArray(products.id, productIds));
+      // Validate items & stock (also supports standalone landing page items via landingPageId)
+      const landingPageId = req.body?.landingPageId ? Number(req.body.landingPageId) : null;
+      const productIds = items.map((i: any) => Number(i.productId)).filter((n: number) => Number.isInteger(n) && n > 0);
+      const dbProducts =
+        productIds.length > 0
+          ? await db.select().from(products).where(inArray(products.id, productIds))
+          : [];
       const prodMap = new Map(dbProducts.map((p) => [p.id, p]));
 
       let subtotalDzd = 0;
       let hasPhysical = false;
       let hasDigital = false;
       const resolvedItems: {
-        product: typeof products.$inferSelect;
+        productId: number | null;
+        productName: string;
+        productSku: string;
+        productType: string;
+        unitPriceDzd: number;
+        costPriceDzd: number;
+        digitalActivationTemplate: string | null;
         quantity: number;
         lineTotalDzd: number;
       }[] = [];
 
       for (const line of items) {
-        const prod = prodMap.get(Number(line.productId));
-        if (!prod || !prod.isActive) {
+        const qty = Math.max(1, Math.floor(Number(line.quantity) || 1));
+        const prod = line.productId ? prodMap.get(Number(line.productId)) : undefined;
+
+        if (prod) {
+          if (!prod.isActive) {
+            return res.status(400).json({ error: 'Un article sélectionné n’est plus disponible.' });
+          }
+          if (prod.productType === 'physical' && prod.stockQuantity < qty) {
+            return res.status(400).json({
+              error: `Stock insuffisant pour "${prod.name}" (${prod.stockQuantity} disponible(s)).`,
+            });
+          }
+          if (prod.productType === 'digital' && prod.digitalAvailability === 'paused') {
+            return res.status(400).json({
+              error: `Le service numérique "${prod.name}" est temporairement indisponible.`,
+            });
+          }
+          const unitPrice =
+            line.customPriceDzd && Number(line.customPriceDzd) > 0
+              ? Math.round(Number(line.customPriceDzd))
+              : prod.priceDzd;
+          const lineTotalDzd = unitPrice * qty;
+          subtotalDzd += lineTotalDzd;
+          if (prod.productType === 'digital') hasDigital = true;
+          else hasPhysical = true;
+          resolvedItems.push({
+            productId: prod.id,
+            productName: prod.name,
+            productSku: prod.sku,
+            productType: prod.productType,
+            unitPriceDzd: unitPrice,
+            costPriceDzd: prod.costPriceDzd,
+            digitalActivationTemplate: prod.digitalActivationTemplate,
+            quantity: qty,
+            lineTotalDzd,
+          });
+        } else if (line.customName && Number(line.customPriceDzd) > 0) {
+          const unitPrice = Math.round(Number(line.customPriceDzd));
+          const lineTotalDzd = unitPrice * qty;
+          subtotalDzd += lineTotalDzd;
+          hasPhysical = true;
+          resolvedItems.push({
+            productId: null,
+            productName: String(line.customName).trim(),
+            productSku: String(line.customSku || 'LP-OFFER').trim(),
+            productType: 'physical',
+            unitPriceDzd: unitPrice,
+            costPriceDzd: 0,
+            digitalActivationTemplate: null,
+            quantity: qty,
+            lineTotalDzd,
+          });
+        } else {
           return res.status(400).json({ error: 'Un article sélectionné n’est plus disponible.' });
         }
-        const qty = Math.max(1, Math.floor(Number(line.quantity) || 1));
-        if (prod.productType === 'physical' && prod.stockQuantity < qty) {
-          return res.status(400).json({
-            error: `Stock insuffisant pour "${prod.name}" (${prod.stockQuantity} disponible(s)).`,
-          });
-        }
-        if (prod.productType === 'digital' && prod.digitalAvailability === 'paused') {
-          return res.status(400).json({
-            error: `Le service numérique "${prod.name}" est temporairement indisponible.`,
-          });
-        }
-        const lineTotalDzd = prod.priceDzd * qty;
-        subtotalDzd += lineTotalDzd;
-        if (prod.productType === 'digital') hasDigital = true;
-        else hasPhysical = true;
-        resolvedItems.push({ product: prod, quantity: qty, lineTotalDzd });
       }
 
       // Calculate verified shipping fee
@@ -786,28 +830,35 @@ export function createApp() {
           .insert(orderItems)
           .values({
             orderId: createdOrder.id,
-            productId: item.product.id,
-            productName: item.product.name,
-            productSku: item.product.sku,
-            productType: item.product.productType,
-            unitPriceDzd: item.product.priceDzd,
-            costPriceDzd: item.product.costPriceDzd,
+            productId: item.productId,
+            productName: item.productName,
+            productSku: item.productSku,
+            productType: item.productType,
+            unitPriceDzd: item.unitPriceDzd,
+            costPriceDzd: item.costPriceDzd,
             quantity: item.quantity,
             lineTotalDzd: item.lineTotalDzd,
           })
           .returning();
 
-        if (item.product.productType === 'digital') {
+        if (item.productType === 'digital') {
           await db.insert(digitalDeliveries).values({
             orderId: createdOrder.id,
             orderItemId: oi.id,
-            productId: item.product.id,
-            productName: item.product.name,
+            productId: item.productId,
+            productName: item.productName,
             deliveryStatus: 'pending',
-            activationInstructions: item.product.digitalActivationTemplate || '',
+            activationInstructions: item.digitalActivationTemplate || '',
             privateFulfillmentNote: '',
           });
         }
+      }
+
+      if (landingPageId && Number.isInteger(landingPageId)) {
+        await db
+          .update(landingPages)
+          .set({ ordersCount: sql`${landingPages.ordersCount} + 1` })
+          .where(eq(landingPages.id, landingPageId));
       }
 
       await db.insert(orderStatusHistory).values({
@@ -824,12 +875,12 @@ export function createApp() {
       return res.status(201).json({
         order: createdOrder,
         items: resolvedItems.map((i) => ({
-          productId: i.product.id,
-          name: i.product.name,
+          productId: i.productId,
+          name: i.productName,
           quantity: i.quantity,
-          unitPriceDzd: i.product.priceDzd,
+          unitPriceDzd: i.unitPriceDzd,
           lineTotalDzd: i.lineTotalDzd,
-          productType: i.product.productType,
+          productType: i.productType,
         })),
       });
     } catch (error) {
@@ -1382,6 +1433,7 @@ export function createApp() {
   app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
     try {
       const id = Number(req.params.id);
+      await db.update(storeSettings).set({ catalogInitialized: true });
       await db.delete(categories).where(eq(categories.id, id));
       return res.json({ deleted: true });
     } catch (error) {
@@ -1405,6 +1457,7 @@ export function createApp() {
         return res.status(400).json({ error: 'Aucune catégorie sélectionnée à supprimer.' });
       }
 
+      await db.update(storeSettings).set({ catalogInitialized: true });
       const deletedRows = await db
         .delete(categories)
         .where(inArray(categories.id, uniqueIds))
@@ -1594,6 +1647,7 @@ export function createApp() {
   app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
     try {
       const id = Number(req.params.id);
+      await db.update(storeSettings).set({ catalogInitialized: true });
       await db.delete(products).where(eq(products.id, id));
       return res.json({ deleted: true });
     } catch (error) {
@@ -1617,6 +1671,7 @@ export function createApp() {
         return res.status(400).json({ error: 'Aucun produit sélectionné à supprimer.' });
       }
 
+      await db.update(storeSettings).set({ catalogInitialized: true });
       const deletedRows = await db
         .delete(products)
         .where(inArray(products.id, uniqueIds))
@@ -2876,6 +2931,377 @@ export function createApp() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // 16. PAGEPILOT: AI LANDING PAGE BUILDER (Admin + Public Conversion Pages)
+  // ---------------------------------------------------------------------------
+  const serializeLandingPage = (row: typeof landingPages.$inferSelect) => {
+    const parseJsonSafe = <T,>(raw: string | null | undefined, fallback: T): T => {
+      if (!raw) return fallback;
+      try {
+        return JSON.parse(raw) as T;
+      } catch {
+        return fallback;
+      }
+    };
+    return {
+      ...row,
+      galleryImages: parseJsonSafe<string[]>(row.galleryImagesJson, []),
+      benefits: parseJsonSafe<{ title: string; description: string }[]>(row.benefitsJson, []),
+      specs: parseJsonSafe<{ label: string; value: string }[]>(row.specsJson, []),
+      testimonials: parseJsonSafe<{ name: string; wilaya: string; rating: number; comment: string }[]>(
+        row.testimonialsJson,
+        [],
+      ),
+      faq: parseJsonSafe<{ question: string; answer: string }[]>(row.faqJson, []),
+    };
+  };
+
+  // Public: get published landing page by slug and increment views
+  app.get('/api/landing-pages/:slug', async (req, res) => {
+    try {
+      const slug = String(req.params.slug || '').trim().toLowerCase();
+      const [page] = await db.select().from(landingPages).where(eq(landingPages.slug, slug));
+      if (!page || !page.isPublished) {
+        return res.status(404).json({ error: 'Cette page d’offre spéciale est introuvable ou inactive.' });
+      }
+      await db
+        .update(landingPages)
+        .set({ viewsCount: sql`${landingPages.viewsCount} + 1` })
+        .where(eq(landingPages.id, page.id));
+
+      return res.json({ landingPage: serializeLandingPage({ ...page, viewsCount: page.viewsCount + 1 }) });
+    } catch (error) {
+      console.error('Get public landing page error:', error);
+      return res.status(500).json({ error: 'Erreur chargement de la landing page.' });
+    }
+  });
+
+  // Admin: list all landing pages
+  app.get('/api/admin/landing-pages', requireAdmin, async (_req, res) => {
+    try {
+      const rows = await db.select().from(landingPages).orderBy(desc(landingPages.createdAt));
+      return res.json({ landingPages: rows.map(serializeLandingPage) });
+    } catch (error) {
+      console.error('Admin list landing pages error:', error);
+      return res.status(500).json({ error: 'Erreur chargement des landing pages.' });
+    }
+  });
+
+  // Admin: PagePilot AI Generator using @google/genai (gemini-4-hydrogen) with smart fallback
+  app.post('/api/admin/pagepilot/generate', requireAdmin, async (req, res) => {
+    const b = req.body || {};
+    const productName = String(b.productName || '').trim();
+    const priceDzd = Math.max(0, Math.round(Number(b.priceDzd) || 0));
+    const compareAtPriceDzd = b.compareAtPriceDzd ? Math.max(0, Math.round(Number(b.compareAtPriceDzd))) : Math.round(priceDzd * 1.25);
+    const keyInfo = String(b.description || b.prompt || '').trim();
+    const tone = String(b.tone || 'conversion').trim();
+
+    if (!productName) {
+      return res.status(400).json({ error: 'Veuillez indiquer le nom du produit ou de l’offre.' });
+    }
+
+    const buildTemplateCopy = () => ({
+      title: `${productName} — Offre Spéciale`,
+      heroBadge: 'OFFRE LIMITÉE ALGÉRIE · LIVRAISON 58 WILAYAS',
+      headline: `${productName} : La performance et la fiabilité au meilleur prix en Algérie`,
+      subheadline:
+        keyInfo ||
+        `Commandez aujourd’hui votre ${productName} chez 2Frères Phone. Paiement à la livraison après vérification, expédition express 24h/48h dans les 58 wilayas.`,
+      ctaText: 'Commander maintenant — Paiement à la livraison',
+      urgencyText: 'Offre promotionnelle en stock limité · Expédition sous 24h',
+      benefits: [
+        {
+          title: 'Qualité Supérieure Certifiée 2Frères Phone',
+          description: 'Testé et sélectionné pour une durabilité maximale au quotidien.',
+        },
+        {
+          title: 'Paiement 100 % à la Livraison (Main à Main)',
+          description: 'Vous ne payez qu’à la réception de votre colis, à domicile ou en bureau Stop Desk.',
+        },
+        {
+          title: 'Livraison Rapide 58 Wilayas',
+          description: 'Expédition suivie sous 24h à 48h partout en Algérie avec numéro de suivi.',
+        },
+        {
+          title: 'Garantie & Support Client Réactif',
+          description: 'Assistance directe par WhatsApp et téléphone 7j/7 par l’équipe 2Frères Phone.',
+        },
+      ],
+      specs: [
+        { label: 'Produit', value: productName },
+        { label: 'Garantie', value: 'Garantie satisfaction 2Frères Phone' },
+        { label: 'Livraison', value: '58 Wilayas (Domicile & Stop Desk)' },
+        { label: 'Paiement', value: 'En espèces à la livraison (DZD)' },
+      ],
+      testimonials: [
+        {
+          name: 'Amine B.',
+          wilaya: 'Alger',
+          rating: 5,
+          comment: 'Reçu en 24h ! Produit conforme et excellente qualité, merci à l’équipe 2Frères Phone.',
+        },
+        {
+          name: 'Sofiane K.',
+          wilaya: 'Oran',
+          rating: 5,
+          comment: 'Très satisfait de mon achat, emballage soigné et service client très sérieux au téléphone.',
+        },
+        {
+          name: 'Yacine M.',
+          wilaya: 'Constantine',
+          rating: 5,
+          comment: 'Rapport qualité/prix imbattable. Je recommande à 100 %.',
+        },
+      ],
+      faq: [
+        {
+          question: 'Comment se passe le paiement et la livraison ?',
+          answer:
+            'Remplissez simplement le formulaire sur cette page. Notre équipe vous appelle pour confirmer, puis vous payez en espèces à la réception du colis dans votre wilaya.',
+        },
+        {
+          question: 'Quels sont les délais de livraison ?',
+          answer:
+            'La livraison prend généralement 24h à 48h pour les wilayas du Nord et 48h à 72h pour le Sud.',
+        },
+        {
+          question: 'Puis-je choisir la livraison en bureau Stop Desk ?',
+          answer:
+            'Oui, vous pouvez choisir entre la livraison à domicile ou le retrait en bureau Stop Desk à tarif réduit directement dans le formulaire.',
+        },
+      ],
+    });
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.json({ generated: buildTemplateCopy(), source: 'template' });
+    }
+
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+
+      const prompt = `Tu es PagePilot AI, expert en création de landing pages e-commerce à très haute conversion pour le marché algérien (boutique "2Frères Phone").
+Génère en français une landing page de vente complète, persuasive et professionnelle pour le produit suivant :
+- Nom du produit : ${productName}
+- Prix de vente : ${priceDzd} DZD${compareAtPriceDzd ? ` (Ancien prix barré : ${compareAtPriceDzd} DZD)` : ''}
+- Informations & arguments clés : ${keyInfo || 'Accessoire / produit tech haut de gamme vendu en Algérie avec paiement à la livraison 58 wilayas.'}
+- Style / Ton souhaité : ${tone}
+
+Respecte le contexte algérien (livraison 58 wilayas, domicile ou Stop Desk, paiement à la livraison en DZD, confirmation téléphonique rapide, confiance et garantie 2Frères Phone).`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              heroBadge: { type: Type.STRING },
+              headline: { type: Type.STRING },
+              subheadline: { type: Type.STRING },
+              ctaText: { type: Type.STRING },
+              urgencyText: { type: Type.STRING },
+              benefits: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                  },
+                },
+              },
+              specs: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    label: { type: Type.STRING },
+                    value: { type: Type.STRING },
+                  },
+                },
+              },
+              testimonials: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    wilaya: { type: Type.STRING },
+                    rating: { type: Type.INTEGER },
+                    comment: { type: Type.STRING },
+                  },
+                },
+              },
+              faq: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    question: { type: Type.STRING },
+                    answer: { type: Type.STRING },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const fallback = buildTemplateCopy();
+      return res.json({
+        generated: {
+          title: parsed.title || fallback.title,
+          heroBadge: parsed.heroBadge || fallback.heroBadge,
+          headline: parsed.headline || fallback.headline,
+          subheadline: parsed.subheadline || fallback.subheadline,
+          ctaText: parsed.ctaText || fallback.ctaText,
+          urgencyText: parsed.urgencyText || fallback.urgencyText,
+          benefits: Array.isArray(parsed.benefits) && parsed.benefits.length > 0 ? parsed.benefits : fallback.benefits,
+          specs: Array.isArray(parsed.specs) && parsed.specs.length > 0 ? parsed.specs : fallback.specs,
+          testimonials:
+            Array.isArray(parsed.testimonials) && parsed.testimonials.length > 0
+              ? parsed.testimonials
+              : fallback.testimonials,
+          faq: Array.isArray(parsed.faq) && parsed.faq.length > 0 ? parsed.faq : fallback.faq,
+        },
+        source: 'gemini',
+      });
+    } catch (error) {
+      console.warn('PagePilot Gemini fallback to template:', error);
+      return res.json({ generated: buildTemplateCopy(), source: 'template' });
+    }
+  });
+
+  // Admin: create landing page
+  app.post('/api/admin/landing-pages', requireAdmin, async (req, res) => {
+    try {
+      const b = req.body || {};
+      const productName = String(b.productName || b.title || '').trim();
+      if (!productName) {
+        return res.status(400).json({ error: 'Le nom du produit est obligatoire.' });
+      }
+      const title = String(b.title || productName).trim();
+      const baseSlug = slugify(String(b.slug || title));
+      const existingSlug = await db.select().from(landingPages).where(eq(landingPages.slug, baseSlug));
+      const finalSlug =
+        existingSlug.length > 0 ? `${baseSlug}-${Math.floor(100 + Math.random() * 900)}` : baseSlug;
+
+      const [created] = await db
+        .insert(landingPages)
+        .values({
+          title,
+          slug: finalSlug,
+          productId: b.productId ? Number(b.productId) : null,
+          productName,
+          priceDzd: Math.max(0, Math.round(Number(b.priceDzd) || 0)),
+          compareAtPriceDzd:
+            b.compareAtPriceDzd !== undefined && b.compareAtPriceDzd !== '' && b.compareAtPriceDzd !== null
+              ? Math.max(0, Math.round(Number(b.compareAtPriceDzd)))
+              : null,
+          heroBadge: String(b.heroBadge || 'Offre Spéciale Algérie · Livraison 58 Wilayas').trim(),
+          headline: String(b.headline || title).trim(),
+          subheadline: String(b.subheadline || '').trim(),
+          ctaText: String(b.ctaText || 'Commander maintenant — Paiement à la livraison').trim(),
+          urgencyText: String(b.urgencyText || 'Stock limité · Expédition rapide 24/48h').trim(),
+          heroImageUrl: b.heroImageUrl ? String(b.heroImageUrl).trim() : null,
+          galleryImagesJson: JSON.stringify(Array.isArray(b.galleryImages) ? b.galleryImages : []),
+          benefitsJson: JSON.stringify(Array.isArray(b.benefits) ? b.benefits : []),
+          specsJson: JSON.stringify(Array.isArray(b.specs) ? b.specs : []),
+          testimonialsJson: JSON.stringify(Array.isArray(b.testimonials) ? b.testimonials : []),
+          faqJson: JSON.stringify(Array.isArray(b.faq) ? b.faq : []),
+          accentColor: String(b.accentColor || '#1d4ed8').trim(),
+          isPublished: b.isPublished !== false,
+        })
+        .returning();
+
+      return res.status(201).json({ landingPage: serializeLandingPage(created) });
+    } catch (error) {
+      console.error('Create landing page error:', error);
+      return res.status(400).json({ error: 'Erreur lors de la création de la landing page.' });
+    }
+  });
+
+  // Admin: update landing page
+  app.patch('/api/admin/landing-pages/:id', requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [existing] = await db.select().from(landingPages).where(eq(landingPages.id, id));
+      if (!existing) return res.status(404).json({ error: 'Landing page introuvable.' });
+
+      const b = req.body || {};
+      const nextSlug =
+        b.slug && String(b.slug).trim() ? slugify(String(b.slug).trim()) : existing.slug;
+
+      const [updated] = await db
+        .update(landingPages)
+        .set({
+          title: b.title !== undefined ? String(b.title).trim() : existing.title,
+          slug: nextSlug,
+          productId:
+            b.productId !== undefined ? (b.productId ? Number(b.productId) : null) : existing.productId,
+          productName: b.productName !== undefined ? String(b.productName).trim() : existing.productName,
+          priceDzd:
+            b.priceDzd !== undefined ? Math.max(0, Math.round(Number(b.priceDzd) || 0)) : existing.priceDzd,
+          compareAtPriceDzd:
+            b.compareAtPriceDzd !== undefined
+              ? b.compareAtPriceDzd !== '' && b.compareAtPriceDzd !== null
+                ? Math.max(0, Math.round(Number(b.compareAtPriceDzd)))
+                : null
+              : existing.compareAtPriceDzd,
+          heroBadge: b.heroBadge !== undefined ? String(b.heroBadge).trim() : existing.heroBadge,
+          headline: b.headline !== undefined ? String(b.headline).trim() : existing.headline,
+          subheadline: b.subheadline !== undefined ? String(b.subheadline).trim() : existing.subheadline,
+          ctaText: b.ctaText !== undefined ? String(b.ctaText).trim() : existing.ctaText,
+          urgencyText: b.urgencyText !== undefined ? String(b.urgencyText).trim() : existing.urgencyText,
+          heroImageUrl:
+            b.heroImageUrl !== undefined
+              ? b.heroImageUrl
+                ? String(b.heroImageUrl).trim()
+                : null
+              : existing.heroImageUrl,
+          galleryImagesJson:
+            b.galleryImages !== undefined ? JSON.stringify(b.galleryImages) : existing.galleryImagesJson,
+          benefitsJson: b.benefits !== undefined ? JSON.stringify(b.benefits) : existing.benefitsJson,
+          specsJson: b.specs !== undefined ? JSON.stringify(b.specs) : existing.specsJson,
+          testimonialsJson:
+            b.testimonials !== undefined ? JSON.stringify(b.testimonials) : existing.testimonialsJson,
+          faqJson: b.faq !== undefined ? JSON.stringify(b.faq) : existing.faqJson,
+          accentColor: b.accentColor !== undefined ? String(b.accentColor).trim() : existing.accentColor,
+          isPublished: b.isPublished !== undefined ? Boolean(b.isPublished) : existing.isPublished,
+          updatedAt: new Date(),
+        })
+        .where(eq(landingPages.id, id))
+        .returning();
+
+      return res.json({ landingPage: serializeLandingPage(updated) });
+    } catch (error) {
+      console.error('Update landing page error:', error);
+      return res.status(400).json({ error: 'Erreur lors de la mise à jour de la landing page.' });
+    }
+  });
+
+  // Admin: delete landing page
+  app.delete('/api/admin/landing-pages/:id', requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      await db.delete(landingPages).where(eq(landingPages.id, id));
+      return res.json({ deleted: true });
+    } catch (error) {
+      return res.status(500).json({ error: 'Erreur lors de la suppression de la landing page.' });
+    }
+  });
+
   return app;
 }
 
@@ -2907,4 +3333,5 @@ async function startServer() {
 if (!process.env.VERCEL) {
   startServer();
 }
+
 

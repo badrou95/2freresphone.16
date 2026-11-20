@@ -8,6 +8,7 @@ export type StoreRoute =
   | { page: 'home' }
   | { page: 'catalog'; group?: string; category?: string; query?: string }
   | { page: 'product'; slug: string }
+  | { page: 'landing'; slug: string }
   | { page: 'checkout' }
   | { page: 'track'; reference?: string };
 

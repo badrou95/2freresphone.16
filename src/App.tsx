@@ -11,6 +11,7 @@ import { CatalogView } from './components/store/CatalogView';
 import { ProductDetailView } from './components/store/ProductDetailView';
 import { CheckoutView } from './components/store/CheckoutView';
 import { OrderTrackingView } from './components/store/OrderTrackingView';
+import { LandingPageView } from './components/store/LandingPageView';
 import { CartDrawer } from './components/store/CartDrawer';
 import { AdminShell } from './components/admin/AdminShell';
 
@@ -47,6 +48,10 @@ function parseLocation(): AppRoute {
   if (pathname.startsWith('/produit/')) {
     const slug = decodeURIComponent(pathname.replace('/produit/', '').replace(/\/$/, ''));
     if (slug) return { page: 'product', slug };
+  }
+  if (pathname.startsWith('/lp/')) {
+    const slug = decodeURIComponent(pathname.replace('/lp/', '').replace(/\/$/, ''));
+    if (slug) return { page: 'landing', slug };
   }
   if (pathname === '/commande') {
     return { page: 'checkout' };
@@ -185,6 +190,15 @@ function StorefrontApp() {
 
             {route.page === 'track' && (
               <OrderTrackingView initialReference={route.reference || ''} />
+            )}
+
+            {route.page === 'landing' && (
+              <LandingPageView
+                slug={route.slug}
+                bootstrap={bootstrap}
+                onTrackOrder={(ref) => navigate(`/suivi?ref=${encodeURIComponent(ref)}`)}
+                onBackToStore={() => navigate('/')}
+              />
             )}
           </>
         ) : null}

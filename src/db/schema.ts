@@ -45,6 +45,7 @@ export const storeSettings = pgTable('store_settings', {
   digitalOrderNote: text('digital_order_note')
     .notNull()
     .default('Livraison et activation numérique après validation de la commande et du paiement.'),
+  catalogInitialized: boolean('catalog_initialized').notNull().default(false),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
@@ -360,6 +361,33 @@ export const socialLinks = pgTable('social_links', {
   pixelId: text('pixel_id'),
   isActive: boolean('is_active').notNull().default(true),
   sortOrder: integer('sort_order').notNull().default(0),
+});
+
+export const landingPages = pgTable('landing_pages', {
+  id: serial('id').primaryKey(),
+  title: text('title').notNull(),
+  slug: text('slug').notNull().unique(),
+  productId: integer('product_id').references(() => products.id, { onDelete: 'set null' }),
+  productName: text('product_name').notNull(),
+  priceDzd: integer('price_dzd').notNull().default(0),
+  compareAtPriceDzd: integer('compare_at_price_dzd'),
+  heroBadge: text('hero_badge').notNull().default('Offre Spéciale Algérie · Livraison 58 Wilayas'),
+  headline: text('headline').notNull(),
+  subheadline: text('subheadline').notNull(),
+  ctaText: text('cta_text').notNull().default('Commander maintenant — Paiement à la livraison'),
+  urgencyText: text('urgency_text').notNull().default('Stock limité · Expédition rapide 24/48h'),
+  heroImageUrl: text('hero_image_url'),
+  galleryImagesJson: text('gallery_images_json').notNull().default('[]'),
+  benefitsJson: text('benefits_json').notNull().default('[]'),
+  specsJson: text('specs_json').notNull().default('[]'),
+  testimonialsJson: text('testimonials_json').notNull().default('[]'),
+  faqJson: text('faq_json').notNull().default('[]'),
+  accentColor: text('accent_color').notNull().default('#1d4ed8'),
+  isPublished: boolean('is_published').notNull().default(true),
+  viewsCount: integer('views_count').notNull().default(0),
+  ordersCount: integer('orders_count').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
 export const categoriesRelations = relations(categories, ({ many }) => ({

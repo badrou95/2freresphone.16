@@ -15,6 +15,7 @@ import {
   Settings,
   ShieldCheck,
   ShoppingCart,
+  Sparkles,
   Star,
   Tag,
   Truck,
@@ -43,6 +44,7 @@ import {
   AdminSocialLinks,
 } from './AdminLogisticsAndSettings';
 import { AdminPrinter } from './AdminPrinter';
+import { AdminPagePilot } from './AdminPagePilot';
 
 interface AdminShellProps {
   publicSettings: StoreSettings;
@@ -62,6 +64,7 @@ type AdminTab =
   | 'returns'
   | 'promotions'
   | 'digital'
+  | 'pagepilot'
   | 'social'
   | 'printer'
   | 'settings';
@@ -96,6 +99,7 @@ export function AdminShell({
   const [returnsList, setReturnsList] = useState<any[]>([]);
   const [promotions, setPromotions] = useState<any[]>([]);
   const [digitalDeliveries, setDigitalDeliveries] = useState<any[]>([]);
+  const [landingPages, setLandingPages] = useState<any[]>([]);
   const [socialLinks, setSocialLinks] = useState<any[]>([]);
   const [settingsData, setSettingsData] = useState<{ settings: any; emailProviderConfigured: boolean } | null>(null);
 
@@ -118,6 +122,7 @@ export function AdminShell({
         retRes,
         promoRes,
         digRes,
+        lpRes,
         socRes,
         setRes,
       ] = await Promise.all([
@@ -134,6 +139,7 @@ export function AdminShell({
         adminFetch<any>('/api/admin/returns'),
         adminFetch<any>('/api/admin/promotions'),
         adminFetch<any>('/api/admin/digital-deliveries'),
+        adminFetch<any>('/api/admin/landing-pages').catch(() => ({ landingPages: [] })),
         adminFetch<any>('/api/admin/social-links'),
         adminFetch<any>('/api/admin/settings'),
       ]);
@@ -152,6 +158,7 @@ export function AdminShell({
       setReturnsList(retRes.returns || []);
       setPromotions(promoRes.promotions || []);
       setDigitalDeliveries(digRes.deliveries || []);
+      setLandingPages(lpRes.landingPages || []);
       setSocialLinks(socRes.socialLinks || []);
       setSettingsData(setRes);
     } catch (err: any) {
@@ -304,6 +311,12 @@ export function AdminShell({
     {
       title: 'Clients & Marketing',
       items: [
+        {
+          id: 'pagepilot',
+          label: 'PagePilot IA (Landing Pages)',
+          icon: Sparkles,
+          badge: landingPages.length || undefined,
+        },
         { id: 'customers', label: 'Clients', icon: Users },
         {
           id: 'reviews',
@@ -525,6 +538,13 @@ export function AdminShell({
           )}
           {activeTab === 'digital' && (
             <AdminDigitalDeliveries deliveries={digitalDeliveries} onRefresh={handleRefresh} />
+          )}
+          {activeTab === 'pagepilot' && (
+            <AdminPagePilot
+              products={products}
+              landingPages={landingPages}
+              onRefresh={handleRefresh}
+            />
           )}
           {activeTab === 'social' && (
             <AdminSocialLinks socialLinks={socialLinks} onRefresh={handleRefresh} />

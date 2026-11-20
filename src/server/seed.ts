@@ -79,6 +79,7 @@ const DDL_STATEMENTS: string[] = [
     store_address text NOT NULL DEFAULT 'Algérie',
     cod_enabled boolean NOT NULL DEFAULT true,
     digital_order_note text NOT NULL DEFAULT 'Livraison et activation numérique après validation de la commande et du paiement.',
+    catalog_initialized boolean NOT NULL DEFAULT false,
     updated_at timestamp NOT NULL DEFAULT now()
   )`,
   `CREATE TABLE IF NOT EXISTS categories (
@@ -347,14 +348,67 @@ const DDL_STATEMENTS: string[] = [
     is_active boolean NOT NULL DEFAULT true,
     sort_order integer NOT NULL DEFAULT 0
   )`,
+  `CREATE TABLE IF NOT EXISTS landing_pages (
+    id serial PRIMARY KEY,
+    title text NOT NULL,
+    slug text NOT NULL UNIQUE,
+    product_id integer REFERENCES products(id) ON DELETE SET NULL,
+    product_name text NOT NULL,
+    price_dzd integer NOT NULL DEFAULT 0,
+    compare_at_price_dzd integer,
+    hero_badge text NOT NULL DEFAULT 'Offre Spéciale Algérie · Livraison 58 Wilayas',
+    headline text NOT NULL,
+    subheadline text NOT NULL,
+    cta_text text NOT NULL DEFAULT 'Commander maintenant — Paiement à la livraison',
+    urgency_text text NOT NULL DEFAULT 'Stock limité · Expédition rapide 24/48h',
+    hero_image_url text,
+    gallery_images_json text NOT NULL DEFAULT '[]',
+    benefits_json text NOT NULL DEFAULT '[]',
+    specs_json text NOT NULL DEFAULT '[]',
+    testimonials_json text NOT NULL DEFAULT '[]',
+    faq_json text NOT NULL DEFAULT '[]',
+    accent_color text NOT NULL DEFAULT '#1d4ed8',
+    is_published boolean NOT NULL DEFAULT true,
+    views_count integer NOT NULL DEFAULT 0,
+    orders_count integer NOT NULL DEFAULT 0,
+    created_at timestamp NOT NULL DEFAULT now(),
+    updated_at timestamp NOT NULL DEFAULT now()
+  )`,
 ];
 
 async function ensureTablesExist(): Promise<void> {
   const check = await db.execute(sql`SELECT to_regclass('public.store_settings') AS tbl`);
   const existing = (check.rows?.[0] as { tbl?: string | null } | undefined)?.tbl;
-  if (existing) return;
-  for (const stmt of DDL_STATEMENTS) {
-    await db.execute(sql.raw(stmt));
+  if (!existing) {
+    for (const stmt of DDL_STATEMENTS) {
+      await db.execute(sql.raw(stmt));
+    }
+    return;
+  }
+  // Ensure newly added columns/tables exist on pre-existing databases (e.g. Neon Postgres on Vercel)
+  try {
+    const colCheck = await db.execute(
+      sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'store_settings' AND column_name = 'catalog_initialized'`,
+    );
+    if (!colCheck.rows || colCheck.rows.length === 0) {
+      await db.execute(
+        sql.raw(
+          `ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS catalog_initialized boolean NOT NULL DEFAULT false`,
+        ),
+      );
+    }
+  } catch (e) {
+    console.warn('Skipping catalog_initialized DDL check:', e);
+  }
+
+  try {
+    const lpCheck = await db.execute(sql`SELECT to_regclass('public.landing_pages') AS tbl`);
+    const lpExisting = (lpCheck.rows?.[0] as { tbl?: string | null } | undefined)?.tbl;
+    if (!lpExisting) {
+      await db.execute(sql.raw(DDL_STATEMENTS[DDL_STATEMENTS.length - 1]));
+    }
+  } catch (e) {
+    console.warn('Skipping landing_pages DDL check:', e);
   }
 }
 
@@ -366,21 +420,26 @@ export async function ensureDatabaseSeeded(): Promise<void> {
     try {
       await ensureTablesExist();
       // 1. Store settings singleton
-      const existingSettings = await db.select().from(storeSettings).limit(1);
-      if (existingSettings.length === 0) {
+      let [settingsRow] = await db.select().from(storeSettings).limit(1);
+      if (!settingsRow) {
         const initialAdminEmail = (process.env.INITIAL_ADMIN_EMAIL || 'badroumc@gmail.com').toLowerCase();
-        await db.insert(storeSettings).values({
-          storeName: '2Frères Phone',
-          tagline: 'Accessoires téléphoniques, Jeux vidéo & Abonnements numériques en Algérie',
-          logoUrl: null,
-          whatsappPhone: '+213550000000',
-          supportEmail: 'contact@2freresphone.dz',
-          adminAlertEmail: initialAdminEmail,
-          defaultLowStockThreshold: 10,
-          currency: 'DZD',
-          storeAddress: 'Algérie — Livraison 58 Wilayas',
-          codEnabled: true,
-        });
+        const [insertedSettings] = await db
+          .insert(storeSettings)
+          .values({
+            storeName: '2Frères Phone',
+            tagline: 'Accessoires téléphoniques, Jeux vidéo & Abonnements numériques en Algérie',
+            logoUrl: null,
+            whatsappPhone: '+213550000000',
+            supportEmail: 'contact@2freresphone.dz',
+            adminAlertEmail: initialAdminEmail,
+            defaultLowStockThreshold: 10,
+            currency: 'DZD',
+            storeAddress: 'Algérie — Livraison 58 Wilayas',
+            codEnabled: true,
+            catalogInitialized: false,
+          })
+          .returning();
+        settingsRow = insertedSettings;
       }
 
       // 2. Initial admin accounts (co-owners)
@@ -402,10 +461,12 @@ export async function ensureDatabaseSeeded(): Promise<void> {
           .onConflictDoNothing({ target: adminUsers.email });
       }
 
-      // 3. Categories
-      const catCountRes = await db.select({ count: sql<number>`count(*)::int` }).from(categories);
-      if ((catCountRes[0]?.count ?? 0) === 0) {
-        await db.insert(categories).values(INITIAL_CATEGORIES).onConflictDoNothing();
+      // 3. Categories (only seeded once on first initialization so deleted categories never respawn)
+      if (!settingsRow?.catalogInitialized) {
+        const catCountRes = await db.select({ count: sql<number>`count(*)::int` }).from(categories);
+        if ((catCountRes[0]?.count ?? 0) === 0) {
+          await db.insert(categories).values(INITIAL_CATEGORIES).onConflictDoNothing();
+        }
       }
 
       // 4. Carriers & editable 58-wilaya shipping grid
@@ -474,9 +535,9 @@ export async function ensureDatabaseSeeded(): Promise<void> {
         }
       }
 
-      // 5. Initial products catalog (only if empty)
+      // 5. Initial products catalog (ONLY seeded on first-ever database initialization)
       const prodCountRes = await db.select({ count: sql<number>`count(*)::int` }).from(products);
-      if ((prodCountRes[0]?.count ?? 0) === 0) {
+      if (!settingsRow?.catalogInitialized && (prodCountRes[0]?.count ?? 0) === 0) {
         const allCats = await db.select().from(categories);
         const catBySlug = new Map(allCats.map((c) => [c.slug, c.id]));
 
@@ -698,6 +759,14 @@ export async function ensureDatabaseSeeded(): Promise<void> {
             });
           }
         }
+      }
+
+      // Mark catalogInitialized = true permanently so deleted starter products or categories never respawn
+      if (settingsRow && !settingsRow.catalogInitialized) {
+        await db
+          .update(storeSettings)
+          .set({ catalogInitialized: true })
+          .where(eq(storeSettings.id, settingsRow.id));
       }
 
       // 6. Social links
