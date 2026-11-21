@@ -13,7 +13,9 @@ import { CheckoutView } from './components/store/CheckoutView';
 import { OrderTrackingView } from './components/store/OrderTrackingView';
 import { LandingPageView } from './components/store/LandingPageView';
 import { CartDrawer } from './components/store/CartDrawer';
+import { CatalogViewSkeleton, StoreHomeSkeleton } from './components/store/StoreSkeletons';
 import { AdminShell } from './components/admin/AdminShell';
+import { getSaasConfig } from './shared/domain';
 
 const DEFAULT_SETTINGS: StoreSettings = {
   storeName: '2Frères Phone',
@@ -84,6 +86,19 @@ function StorefrontApp() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
+  const [, setUiTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setUiTick((t) => t + 1);
+    window.addEventListener('2fp-currency-change', bump);
+    window.addEventListener('2fp-lang-change', bump);
+    window.addEventListener('2fp-saas-config-change', bump);
+    return () => {
+      window.removeEventListener('2fp-currency-change', bump);
+      window.removeEventListener('2fp-lang-change', bump);
+      window.removeEventListener('2fp-saas-config-change', bump);
+    };
+  }, []);
+
   const loadStoreData = useCallback(async () => {
     try {
       const [bootRes, prodsRes] = await Promise.all([
@@ -129,10 +144,11 @@ function StorefrontApp() {
 
       <main className="flex-1">
         {loading && !bootstrap ? (
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-24 text-center space-y-3">
-            <div className="w-8 h-8 border-2 border-blue-700 border-t-transparent rounded-full animate-spin mx-auto" />
-            <p className="text-sm text-slate-500">Chargement de la boutique 2Frères Phone...</p>
-          </div>
+          route.page === 'catalog' ? (
+            <CatalogViewSkeleton />
+          ) : (
+            <StoreHomeSkeleton />
+          )
         ) : loadError && !bootstrap ? (
           <div className="max-w-lg mx-auto px-4 py-20 text-center space-y-4">
             <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl p-4">
@@ -152,6 +168,7 @@ function StorefrontApp() {
               <StoreHome
                 bootstrap={bootstrap}
                 products={products}
+                loading={loading}
                 navigate={navigate}
                 onAddToCart={(p) => addItem(p, 1)}
               />
@@ -162,6 +179,7 @@ function StorefrontApp() {
                 key={`${route.group || ''}-${route.category || ''}-${route.query || ''}`}
                 products={products}
                 categories={bootstrap.categories}
+                loading={loading}
                 initialGroup={route.group || ''}
                 initialCategory={route.category || ''}
                 initialQuery={route.query || ''}
@@ -174,9 +192,13 @@ function StorefrontApp() {
               <ProductDetailView
                 slug={route.slug}
                 settings={settings}
+                bootstrap={bootstrap}
+                allProducts={products}
+                onSelectProduct={(nextSlug) => navigate(`/produit/${encodeURIComponent(nextSlug)}`)}
                 onBack={() => navigate('/catalogue')}
                 onAddToCart={(p, qty, color) => addItem(p, qty, color)}
                 onGoCheckout={() => navigate('/commande')}
+                onTrackOrder={(ref) => navigate(`/suivi?ref=${encodeURIComponent(ref)}`)}
               />
             )}
 
@@ -308,6 +330,21 @@ function StorefrontApp() {
           </div>
         </div>
       </footer>
+
+      {getSaasConfig().whatsappFloatingButtonEnabled && route.page !== 'product' && (
+        <a
+          href={`https://wa.me/${whatsappDigits}?text=${encodeURIComponent(
+            `Bonjour ${settings.storeName}, je souhaite commander un article avec livraison (paiement à la livraison COD).`,
+          )}`}
+          target="_blank"
+          rel="noreferrer"
+          title="Assistance & Commande rapide sur WhatsApp"
+          className="fixed bottom-5 right-5 z-30 inline-flex items-center gap-2 px-4 py-3 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-lg transition-transform hover:scale-105"
+        >
+          <MessageCircle className="w-4 h-4" />
+          <span className="hidden sm:inline">WhatsApp · Commande COD</span>
+        </a>
+      )}
 
       <CartDrawer onCheckout={() => navigate('/commande')} />
     </div>

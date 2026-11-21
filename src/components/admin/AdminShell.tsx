@@ -12,6 +12,7 @@ import {
   Package,
   Printer,
   RefreshCw,
+  Rocket,
   RotateCcw,
   Settings,
   ShieldCheck,
@@ -47,6 +48,7 @@ import {
 import { AdminPrinter } from './AdminPrinter';
 import { AdminPagePilot } from './AdminPagePilot';
 import { MdfIdfBinaryDecoderModule } from './MdfIdfBinaryDecoderModule';
+import { AdminSaasEcosystemHub } from './AdminSaasEcosystemHub';
 
 interface AdminShellProps {
   publicSettings: StoreSettings;
@@ -56,6 +58,7 @@ interface AdminShellProps {
 
 type AdminTab =
   | 'overview'
+  | 'saas_hub'
   | 'orders'
   | 'sales'
   | 'products'
@@ -331,6 +334,12 @@ export function AdminShell({
       title: 'Pilotage',
       items: [
         { id: 'overview', label: 'Vue générale', icon: LayoutDashboard },
+        {
+          id: 'saas_hub',
+          label: 'Hub SaaS DZ & Intl',
+          icon: Rocket,
+          badge: 'NOUVEAU',
+        },
         { id: 'orders', label: 'Commandes', icon: ShoppingCart, badge: dashboard?.kpis?.newOrders || undefined },
         { id: 'sales', label: 'Ventes & Compta', icon: BarChart3 },
       ],
@@ -512,6 +521,14 @@ export function AdminShell({
           <div className="flex items-center gap-2">
             <button
               type="button"
+              onClick={() => handleNavigateTab('saas_hub')}
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-sm"
+            >
+              <Rocket className="w-3.5 h-3.5" />
+              <span>Hub SaaS DZ &amp; Intl</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setShowGlobalMdfModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-sm"
             >
@@ -542,6 +559,13 @@ export function AdminShell({
               data={dashboard}
               products={products}
               categories={categories}
+              onRefresh={handleRefresh}
+              onNavigateTab={handleNavigateTab}
+            />
+          )}
+          {activeTab === 'saas_hub' && (
+            <AdminSaasEcosystemHub
+              carriers={carriers}
               onRefresh={handleRefresh}
               onNavigateTab={handleNavigateTab}
             />

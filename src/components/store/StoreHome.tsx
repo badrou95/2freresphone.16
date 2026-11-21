@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ArrowRight, CheckCircle2, Search, ShieldCheck, Truck } from 'lucide-react';
 import { StoreBootstrap, StoreProduct } from '../../types';
 import { ProductCard } from './ProductCard';
+import { ProductCardSkeleton } from './StoreSkeletons';
 
 const HERO_IMG = '/src/assets/images/hero_2freres_tech_1795096637447.jpg';
 const CAT_ACC_IMG = '/src/assets/images/cat_phone_accessories_1795096637386.jpg';
@@ -11,11 +12,12 @@ const CAT_DIGITAL_IMG = '/src/assets/images/cat_digital_cards_1795096637686.jpg'
 interface StoreHomeProps {
   bootstrap: StoreBootstrap;
   products: StoreProduct[];
+  loading?: boolean;
   navigate: (path: string) => void;
   onAddToCart: (product: StoreProduct) => void;
 }
 
-export function StoreHome({ bootstrap, products, navigate, onAddToCart }: StoreHomeProps) {
+export function StoreHome({ bootstrap, products, loading = false, navigate, onAddToCart }: StoreHomeProps) {
   const [searchQuery, setSearchQuery] = useState('');
 
   const featuredProducts = products.filter((p) => p.isFeatured).slice(0, 6);
@@ -209,14 +211,16 @@ export function StoreHome({ bootstrap, products, navigate, onAddToCart }: StoreH
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-          {displayProducts.map((product) => (
-            <ProductCard
-              key={product.id}
-              product={product}
-              onSelect={(slug) => navigate(`/produit/${slug}`)}
-              onAddToCart={onAddToCart}
-            />
-          ))}
+          {loading
+            ? Array.from({ length: 6 }).map((_, idx) => <ProductCardSkeleton key={idx} />)
+            : displayProducts.map((product) => (
+                <ProductCard
+                  key={product.id}
+                  product={product}
+                  onSelect={(slug) => navigate(`/produit/${slug}`)}
+                  onAddToCart={onAddToCart}
+                />
+              ))}
         </div>
       </section>
     </div>

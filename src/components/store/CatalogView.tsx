@@ -3,10 +3,12 @@ import { Search, SlidersHorizontal, X } from 'lucide-react';
 import { Category, StoreProduct } from '../../types';
 import { CATEGORY_GROUPS } from '../../shared/domain';
 import { ProductCard } from './ProductCard';
+import { ProductCardSkeleton } from './StoreSkeletons';
 
 interface CatalogViewProps {
   products: StoreProduct[];
   categories: Category[];
+  loading?: boolean;
   initialGroup?: string;
   initialCategory?: string;
   initialQuery?: string;
@@ -17,6 +19,7 @@ interface CatalogViewProps {
 export function CatalogView({
   products,
   categories,
+  loading = false,
   initialGroup = '',
   initialCategory = '',
   initialQuery = '',
@@ -233,7 +236,13 @@ export function CatalogView({
 
         {/* Product Grid */}
         <div className="lg:col-span-9">
-          {filtered.length === 0 ? (
+          {loading ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6">
+              {Array.from({ length: 6 }).map((_, idx) => (
+                <ProductCardSkeleton key={idx} />
+              ))}
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
               <p className="font-display font-semibold text-base text-slate-900">
                 Aucun produit ne correspond à ces critères

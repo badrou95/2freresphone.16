@@ -5,11 +5,14 @@ import {
   Eye,
   Kanban,
   List,
+  MessageCircle,
   Printer,
   Receipt,
   Search,
   ShieldAlert,
+  Sparkles,
   Trash2,
+  Truck,
   X,
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
@@ -30,10 +33,20 @@ interface AdminOrdersProps {
   onRefresh: () => void;
 }
 
+type CarrierExportFormat = 'standard' | 'yalidine' | 'zrexpress' | 'maystro' | 'ecotrack';
+
+function formatAlgPhoneForWa(phone: string): string {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.startsWith('213')) return digits;
+  if (digits.startsWith('0') && digits.length === 10) return `213${digits.slice(1)}`;
+  return `213${digits}`;
+}
+
 export function AdminOrders({ orders, carriers, storeSettings = {}, onRefresh }: AdminOrdersProps) {
   const [viewMode, setViewMode] = useState<'table' | 'kanban'>('table');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [exportFormat, setExportFormat] = useState<CarrierExportFormat>('yalidine');
   const [page, setPage] = useState(1);
   const [selectedOrder, setSelectedOrder] = useState<any | null>(null);
   const [saving, setSaving] = useState(false);
@@ -143,27 +156,148 @@ export function AdminOrders({ orders, carriers, storeSettings = {}, onRefresh }:
   };
 
   const handleExportCsv = () => {
-    const csv = toCsv(
-      ['Référence', 'Date', 'Client', 'Téléphone', 'Wilaya', 'Commune', 'Livraison', 'Statut', 'Total DZD'],
-      filtered.map((o) => [
-        o.reference,
-        new Date(o.createdAt).toLocaleString('fr-FR'),
-        `${o.firstName} ${o.lastName}`,
-        o.phone,
-        o.wilayaName,
-        o.commune,
-        o.deliveryType,
-        ORDER_STATUS_LABELS[o.status as OrderStatus] || o.status,
-        o.totalDzd,
-      ]),
-    );
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    let csv = '';
+    let filename = `2freres-commandes-${exportFormat}-${dateStamp}.csv`;
+
+    const buildProductsSummary = (o: any) =>
+      (o.items || []).map((i: any) => `${i.productName} x${i.quantity}`).join(' + ') || 'Commande 2Frères Phone';
+
+    if (exportFormat === 'yalidine') {
+      csv = toCsv(
+        [
+          'Nom',
+          'Prénom',
+          'Téléphone',
+          'Wilaya',
+          'Commune',
+          'Adresse',
+          'Stop Desk (Oui/Non)',
+          'Produit',
+          'Montant COD (DZD)',
+          'Référence Interne',
+          'Échange (Oui/Non)',
+        ],
+        filtered.map((o) => [
+          o.lastName || o.firstName,
+          o.firstName,
+          o.phone,
+          `${String(o.wilayaCode || '').padStart(2, '0')} - ${o.wilayaName}`,
+          o.commune,
+          o.address,
+          o.deliveryType === 'stop_desk' ? 'Oui' : 'Non',
+          buildProductsSummary(o),
+          o.totalDzd,
+          o.reference,
+          'Non',
+        ]),
+      );
+    } else if (exportFormat === 'zrexpress') {
+      csv = toCsv(
+        [
+          'Client',
+          'Tel1',
+          'Tel2',
+          'Wilaya',
+          'Commune',
+          'Adresse',
+          'Type Livraison',
+          'Contenu Colis',
+          'Total COD DZD',
+          'Ref Boutique',
+        ],
+        filtered.map((o) => [
+          `${o.firstName} ${o.lastName}`.trim(),
+          o.phone,
+          '',
+          o.wilayaName,
+          o.commune,
+          o.address,
+          o.deliveryType === 'stop_desk' ? 'STOP DESK' : 'DOMICILE',
+          buildProductsSummary(o),
+          o.totalDzd,
+          o.reference,
+        ]),
+      );
+    } else if (exportFormat === 'maystro') {
+      csv = toCsv(
+        [
+          'external_id',
+          'customer_name',
+          'customer_phone',
+          'wilaya_code',
+          'wilaya_name',
+          'commune_name',
+          'delivery_address',
+          'is_stop_desk',
+          'products_description',
+          'cod_amount_dzd',
+        ],
+        filtered.map((o) => [
+          o.reference,
+          `${o.firstName} ${o.lastName}`.trim(),
+          o.phone,
+          o.wilayaCode,
+          o.wilayaName,
+          o.commune,
+          o.address,
+          o.deliveryType === 'stop_desk' ? '1' : '0',
+          buildProductsSummary(o),
+          o.totalDzd,
+        ]),
+      );
+    } else if (exportFormat === 'ecotrack') {
+      csv = toCsv(
+        [
+          'reference',
+          'nom_client',
+          'telephone',
+          'code_wilaya',
+          'commune',
+          'adresse',
+          'stop_desk',
+          'designation',
+          'montant_da',
+        ],
+        filtered.map((o) => [
+          o.reference,
+          `${o.firstName} ${o.lastName}`.trim(),
+          o.phone,
+          o.wilayaCode,
+          o.commune,
+          o.address,
+          o.deliveryType === 'stop_desk' ? 'OUI' : 'NON',
+          buildProductsSummary(o),
+          o.totalDzd,
+        ]),
+      );
+    } else {
+      csv = toCsv(
+        ['Référence', 'Date', 'Client', 'Téléphone', 'Wilaya', 'Commune', 'Livraison', 'Statut', 'Total DZD'],
+        filtered.map((o) => [
+          o.reference,
+          new Date(o.createdAt).toLocaleString('fr-FR'),
+          `${o.firstName} ${o.lastName}`,
+          o.phone,
+          o.wilayaName,
+          o.commune,
+          o.deliveryType,
+          ORDER_STATUS_LABELS[o.status as OrderStatus] || o.status,
+          o.totalDzd,
+        ]),
+      );
+    }
+
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `2freres-commandes-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+    setActionSuccess(
+      `Export CSV (${exportFormat.toUpperCase()}) généré avec succès pour ${filtered.length} commande(s).`,
+    );
   };
 
   return (
@@ -221,7 +355,7 @@ export function AdminOrders({ orders, carriers, storeSettings = {}, onRefresh }:
           </select>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="inline-flex p-1 bg-slate-100 rounded-lg">
             <button
               type="button"
@@ -244,14 +378,33 @@ export function AdminOrders({ orders, carriers, storeSettings = {}, onRefresh }:
               <span>Kanban</span>
             </button>
           </div>
-          <button
-            type="button"
-            onClick={handleExportCsv}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>CSV</span>
-          </button>
+
+          <div className="inline-flex items-center rounded-lg border border-slate-300 bg-white overflow-hidden">
+            <span className="pl-2.5 pr-1 text-[11px] font-semibold text-slate-500 inline-flex items-center gap-1">
+              <Truck className="w-3.5 h-3.5 text-emerald-600" />
+              Format :
+            </span>
+            <select
+              value={exportFormat}
+              onChange={(e) => setExportFormat(e.target.value as CarrierExportFormat)}
+              aria-label="Format d'export transporteur Algérie"
+              className="px-2 py-2 text-xs font-bold text-slate-800 bg-white focus:outline-none border-r border-slate-200"
+            >
+              <option value="yalidine">Yalidine Express (DZ)</option>
+              <option value="zrexpress">ZR Express (DZ)</option>
+              <option value="maystro">Maystro / Colisify (DZ)</option>
+              <option value="ecotrack">Ecotrack / Noest / Guepex</option>
+              <option value="standard">CSV Standard</option>
+            </select>
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-700 hover:bg-emerald-800 text-xs font-bold text-white transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Exporter Colis</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -331,6 +484,21 @@ export function AdminOrders({ orders, carriers, storeSettings = {}, onRefresh }:
                         </td>
                         <td className="py-3 px-4 text-right">
                           <div className="inline-flex items-center gap-1.5">
+                            <a
+                              href={`https://wa.me/${formatAlgPhoneForWa(o.phone)}?text=${encodeURIComponent(
+                                `Bonjour ${o.firstName} ${o.lastName}, c'est la boutique ${
+                                  storeSettings.storeName || '2Frères Phone'
+                                } ! Nous vous contactons pour confirmer votre commande ${o.reference} (${formatDzd(
+                                  o.totalDzd,
+                                )}) vers ${o.wilayaName} (${o.commune}). Confirmez-vous l'expédition ?`,
+                              )}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              title="Confirmer la commande via WhatsApp (Call-Center Anti-Retour)"
+                              className="p-1.5 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700"
+                            >
+                              <MessageCircle className="w-3.5 h-3.5" />
+                            </a>
                             <button
                               type="button"
                               onClick={() => printDeliverySlip(o, storeSettings)}
@@ -547,11 +715,29 @@ export function AdminOrders({ orders, carriers, storeSettings = {}, onRefresh }:
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Numéro de suivi (Tracking)</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold text-slate-700">Numéro de suivi (Tracking)</label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const selectedCarrier = carriers.find((c) => String(c.id) === String(editCarrierId));
+                        const prefix = selectedCarrier?.code
+                          ? selectedCarrier.code.slice(0, 3).toUpperCase()
+                          : 'YAL';
+                        const wilayaPad = String(selectedOrder.wilayaCode || 16).padStart(2, '0');
+                        const rand = Math.floor(100000 + Math.random() * 900000);
+                        setEditTracking(`${prefix}-DZ${wilayaPad}-${rand}`);
+                      }}
+                      className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-700 hover:underline"
+                    >
+                      <Sparkles className="w-3 h-3" />
+                      <span>Générer bordereau auto</span>
+                    </button>
+                  </div>
                   <input
                     value={editTracking}
                     onChange={(e) => setEditTracking(e.target.value)}
-                    placeholder="Ex. YAL-982341"
+                    placeholder="Ex. YAL-DZ16-982341"
                     className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 font-mono"
                   />
                 </div>

@@ -36,13 +36,129 @@ export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
 };
 
 export const CATEGORY_GROUPS = [
-  { value: 'accessories', label: 'Accessoires téléphoniques' },
-  { value: 'gaming', label: 'Jeux vidéo' },
-  { value: 'digital', label: 'Abonnements numériques' },
+  { value: 'accessories', label: 'Accessoires téléphoniques', labelAr: 'إكسسوارات الهواتف' },
+  { value: 'gaming', label: 'Jeux vidéo', labelAr: 'ألعاب الفيديو' },
+  { value: 'digital', label: 'Abonnements numériques', labelAr: 'الاشتراكات الرقمية' },
 ] as const;
 
-export function formatDzd(amount: number): string {
+export type StoreCurrency = 'DZD' | 'EUR' | 'USD';
+export type StoreLang = 'fr' | 'ar';
+
+export function getActiveStoreCurrency(): StoreCurrency {
+  if (typeof window === 'undefined') return 'DZD';
+  const saved = (window as any).__2fp_currency || localStorage.getItem('2fp_store_currency');
+  if (saved === 'EUR' || saved === 'USD') return saved;
+  return 'DZD';
+}
+
+export function setActiveStoreCurrency(currency: StoreCurrency) {
+  if (typeof window === 'undefined') return;
+  (window as any).__2fp_currency = currency;
+  try {
+    localStorage.setItem('2fp_store_currency', currency);
+    window.dispatchEvent(new CustomEvent('2fp-currency-change', { detail: currency }));
+  } catch {
+    // ignore
+  }
+}
+
+export function getActiveStoreLang(): StoreLang {
+  if (typeof window === 'undefined') return 'fr';
+  const saved = (window as any).__2fp_lang || localStorage.getItem('2fp_store_lang');
+  return saved === 'ar' ? 'ar' : 'fr';
+}
+
+export function setActiveStoreLang(lang: StoreLang) {
+  if (typeof window === 'undefined') return;
+  (window as any).__2fp_lang = lang;
+  try {
+    localStorage.setItem('2fp_store_lang', lang);
+    document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+    document.documentElement.lang = lang;
+    window.dispatchEvent(new CustomEvent('2fp-lang-change', { detail: lang }));
+  } catch {
+    // ignore
+  }
+}
+
+export const getActiveCurrency = getActiveStoreCurrency;
+export const setActiveCurrency = setActiveStoreCurrency;
+export const getActiveLang = getActiveStoreLang;
+export const setActiveLang = setActiveStoreLang;
+
+export interface SaasFeaturesConfig {
+  directCodFormOnProduct: boolean;
+  quantityBundlesEnabled: boolean;
+  stickyCartBarEnabled: boolean;
+  urgencyVisitorsEnabled: boolean;
+  sameDayDispatchTimerEnabled: boolean;
+  crossSellBundlesEnabled: boolean;
+  whatsappFloatingButtonEnabled: boolean;
+  liveOrderToastEnabled: boolean;
+  bilingualArFrEnabled: boolean;
+  multiCurrencyEnabled: boolean;
+  antiReturnScoreEnabled: boolean;
+  announcementBarEnabled: boolean;
+  announcementTextFr: string;
+  announcementTextAr: string;
+}
+
+export const DEFAULT_SAAS_CONFIG: SaasFeaturesConfig = {
+  directCodFormOnProduct: true,
+  quantityBundlesEnabled: true,
+  stickyCartBarEnabled: true,
+  urgencyVisitorsEnabled: true,
+  sameDayDispatchTimerEnabled: true,
+  crossSellBundlesEnabled: true,
+  whatsappFloatingButtonEnabled: true,
+  liveOrderToastEnabled: true,
+  bilingualArFrEnabled: true,
+  multiCurrencyEnabled: true,
+  antiReturnScoreEnabled: true,
+  announcementBarEnabled: true,
+  announcementTextFr:
+    'Livraison Express 58 Wilayas (Yalidine · ZR Express · Maystro) · Paiement 100% à la livraison (COD) après vérification du colis',
+  announcementTextAr:
+    'توصيل سريع لـ 58 ولاية (ياليدين · ZR Express · مايسترو) · الدفع 100% عند الاستلام بعد فحص الطرد',
+};
+
+export function getSaasConfig(): SaasFeaturesConfig {
+  if (typeof window === 'undefined') return DEFAULT_SAAS_CONFIG;
+  try {
+    const raw = localStorage.getItem('2fp_saas_features_config');
+    if (!raw) return DEFAULT_SAAS_CONFIG;
+    return { ...DEFAULT_SAAS_CONFIG, ...JSON.parse(raw) };
+  } catch {
+    return DEFAULT_SAAS_CONFIG;
+  }
+}
+
+export function saveSaasConfig(next: Partial<SaasFeaturesConfig>): SaasFeaturesConfig {
+  const merged = { ...getSaasConfig(), ...next };
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem('2fp_saas_features_config', JSON.stringify(merged));
+      window.dispatchEvent(new CustomEvent('2fp-saas-config-change', { detail: merged }));
+    } catch {
+      // ignore
+    }
+  }
+  return merged;
+}
+
+export function formatDzd(amount: number, forceDzd = false): string {
   const safe = Number.isFinite(amount) ? Math.round(amount) : 0;
+  if (!forceDzd && typeof window !== 'undefined') {
+    const cur = getActiveStoreCurrency();
+    if (cur === 'EUR') {
+      const eur = (safe / 245).toFixed(2);
+      return `${eur} €`;
+    }
+    if (cur === 'USD') {
+      const usd = (safe / 225).toFixed(2);
+      return `${usd} $`;
+    }
+  }
   return `${safe.toLocaleString('fr-DZ')} DZD`;
 }
 
