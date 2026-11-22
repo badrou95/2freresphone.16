@@ -14,14 +14,63 @@ import {
   Trash2,
   Upload,
   X,
+  ZoomIn,
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
 import { printProductThermalLabels } from '../../lib/printer';
 import { CATEGORY_GROUPS, formatDzd } from '../../shared/domain';
 import { StoreSettings } from '../../types';
+import { ImageZoomLightbox } from '../ImageZoomLightbox';
 import { ProductImage } from '../ProductImage';
 import { MdfIdfBinaryDecoderModule } from './MdfIdfBinaryDecoderModule';
 import { OkwinImageStudio, ProductColorsEditor } from './OkwinImageStudio';
+
+const QUICK_PRESET_CATEGORIES: {
+  name: string;
+  categoryGroup: 'accessories' | 'gaming' | 'digital';
+  description: string;
+}[] = [
+  {
+    name: 'Kits oreillettes filaires',
+    categoryGroup: 'accessories',
+    description: 'Écouteurs et kits piétons filaires Jack 3.5mm, Type-C et Lightning',
+  },
+  {
+    name: 'Supports de téléphone',
+    categoryGroup: 'accessories',
+    description: 'Supports voiture, bureau, vélo et trépieds pour smartphones',
+  },
+  {
+    name: 'Promotion',
+    categoryGroup: 'accessories',
+    description: 'Offres spéciales, déstockage et promotions flash',
+  },
+  {
+    name: 'Écouteurs Bluetooth & AirPods',
+    categoryGroup: 'accessories',
+    description: 'Écouteurs sans fil TWS et casques audio Bluetooth',
+  },
+  {
+    name: 'Chargeurs & Câbles Rapides',
+    categoryGroup: 'accessories',
+    description: 'Chargeurs secteur Fast Charge, GaN et câbles renforcés',
+  },
+  {
+    name: 'Coques & Verres Trempés',
+    categoryGroup: 'accessories',
+    description: 'Protections antichoc et films verre trempé 9H',
+  },
+  {
+    name: 'Batteries Externes (Powerbank)',
+    categoryGroup: 'accessories',
+    description: 'Powerbanks haute capacité 10000mAh à 30000mAh',
+  },
+  {
+    name: 'Montres Connectées',
+    categoryGroup: 'accessories',
+    description: 'Smartwatches et bracelets connectés',
+  },
+];
 
 interface AdminProductsProps {
   products: any[];
@@ -52,6 +101,17 @@ export function AdminProducts({
   const [formState, setFormState] = useState<any>({});
   const [savingProduct, setSavingProduct] = useState(false);
   const [showModalOkwin, setShowModalOkwin] = useState(false);
+
+  // Inline quick category creation inside Product modal
+  const [showInlineNewCat, setShowInlineNewCat] = useState(false);
+  const [inlineNewCatName, setInlineNewCatName] = useState('');
+
+  // Fullscreen image zoom lightbox
+  const [lightboxData, setLightboxData] = useState<{
+    images: { url: string; alt?: string }[];
+    initialIndex: number;
+    title?: string;
+  } | null>(null);
 
   // Quick Photo Gallery Modal for any product (ideal right after stock DB import!)
   const [photoModalProduct, setPhotoModalProduct] = useState<any | null>(null);
@@ -319,6 +379,70 @@ export function AdminProducts({
     }));
   };
 
+  const handleSetOkwinImageAsPrimaryInModal = async (url: string) => {
+    if (!url) return;
+    if (editingProduct && !editingProduct.isNew && editingProduct.id) {
+      await adminFetch(`/api/admin/products/${editingProduct.id}/images`, {
+        method: 'POST',
+        body: JSON.stringify({ url, isPrimary: true }),
+      });
+      onRefresh();
+    }
+    setFormState((prev: any) => {
+      const existing = Array.isArray(prev.imageUrls) ? prev.imageUrls : [];
+      return {
+        ...prev,
+        imageUrls: [url, ...existing.filter((u: string) => u !== url)],
+      };
+    });
+  };
+
+  const handleSetModalPhotoPrimary = async (url: string) => {
+    if (!url) return;
+    setFormState((prev: any) => {
+      const existing = Array.isArray(prev.imageUrls) ? prev.imageUrls : [];
+      return {
+        ...prev,
+        imageUrls: [url, ...existing.filter((u: string) => u !== url)],
+      };
+    });
+    if (editingProduct && !editingProduct.isNew && editingProduct.id) {
+      const liveProd = products.find((p) => p.id === editingProduct.id) || editingProduct;
+      const matchingImg = (liveProd.images || []).find((i: any) => i.url === url);
+      if (matchingImg?.id) {
+        await adminFetch(`/api/admin/products/${editingProduct.id}/images/${matchingImg.id}/primary`, {
+          method: 'PATCH',
+        });
+      } else {
+        await adminFetch(`/api/admin/products/${editingProduct.id}/images`, {
+          method: 'POST',
+          body: JSON.stringify({ url, isPrimary: true }),
+        });
+      }
+      onRefresh();
+    }
+  };
+
+  const handleRemoveModalPhoto = async (url: string) => {
+    setFormState((prev: any) => {
+      const existing = Array.isArray(prev.imageUrls) ? prev.imageUrls : [];
+      return {
+        ...prev,
+        imageUrls: existing.filter((u: string) => u !== url),
+      };
+    });
+    if (editingProduct && !editingProduct.isNew && editingProduct.id) {
+      const liveProd = products.find((p) => p.id === editingProduct.id) || editingProduct;
+      const matchingImg = (liveProd.images || []).find((i: any) => i.url === url);
+      if (matchingImg?.id) {
+        await adminFetch(`/api/admin/products/${editingProduct.id}/images/${matchingImg.id}`, {
+          method: 'DELETE',
+        });
+        onRefresh();
+      }
+    }
+  };
+
   const handleAttachOkwinImagesToPhotoModal = async (productId: number, urls: string[]) => {
     if (!urls || urls.length === 0) return;
     for (const url of urls) {
@@ -327,6 +451,15 @@ export function AdminProducts({
         body: JSON.stringify({ url }),
       });
     }
+    onRefresh();
+  };
+
+  const handleSetOkwinImageAsPrimaryInPhotoModal = async (productId: number, url: string) => {
+    if (!url) return;
+    await adminFetch(`/api/admin/products/${productId}/images`, {
+      method: 'POST',
+      body: JSON.stringify({ url, isPrimary: true }),
+    });
     onRefresh();
   };
 
@@ -410,6 +543,40 @@ export function AdminProducts({
     setCatDescription('');
   };
 
+  const handleQuickCreateCategory = async (
+    name: string,
+    group: 'accessories' | 'gaming' | 'digital' = 'accessories',
+    description = '',
+    selectInModal = false,
+  ) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setSavingCategory(true);
+    setFeedbackError(null);
+    setFeedbackSuccess(null);
+    try {
+      const created = await adminFetch<{ id: number; name: string }>('/api/admin/categories', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: trimmed,
+          categoryGroup: group,
+          description: description || null,
+        }),
+      });
+      setFeedbackSuccess(`Catégorie « ${trimmed} » ajoutée avec succès.`);
+      if (selectInModal && created?.id) {
+        setFormState((prev: any) => ({ ...prev, categoryId: created.id }));
+      }
+      setInlineNewCatName('');
+      setShowInlineNewCat(false);
+      onRefresh();
+    } catch (err: any) {
+      setFeedbackError(err.message || 'Impossible de créer la catégorie.');
+    } finally {
+      setSavingCategory(false);
+    }
+  };
+
   const handleSaveCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!catName.trim()) return;
@@ -444,8 +611,8 @@ export function AdminProducts({
     }
   };
 
-  const handleDeleteCategory = async (id: number) => {
-    if (confirmDeleteCatId !== id) {
+  const handleDeleteCategory = async (id: number, skipConfirm = false) => {
+    if (!skipConfirm && confirmDeleteCatId !== id) {
       setConfirmDeleteCatId(id);
       return;
     }
@@ -456,6 +623,9 @@ export function AdminProducts({
       setConfirmDeleteCatId(null);
       setSelectedCategoryIds((prev) => prev.filter((item) => item !== id));
       if (editingCategoryId === id) cancelEditCategory();
+      if (String(formState.categoryId || '') === String(id)) {
+        setFormState((prev: any) => ({ ...prev, categoryId: '' }));
+      }
       setFeedbackSuccess('Catégorie supprimée avec succès.');
       onRefresh();
     } catch (err: any) {
@@ -909,7 +1079,7 @@ export function AdminProducts({
                 required
                 value={catName}
                 onChange={(e) => setCatName(e.target.value)}
-                placeholder="Ex. Montres connectées"
+                placeholder="Ex. Kits oreillettes filaires, Supports de téléphone, Promotion..."
                 className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
               />
             </div>
@@ -963,6 +1133,43 @@ export function AdminProducts({
                   ? 'Enregistrer la modification'
                   : 'Créer la catégorie'}
               </button>
+            </div>
+
+            {/* 1-Click Quick Suggested Categories */}
+            <div className="pt-3 border-t border-slate-200 space-y-2">
+              <span className="block text-[11px] font-bold text-slate-600 uppercase tracking-wider">
+                Ajout rapide en 1 clic :
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {QUICK_PRESET_CATEGORIES.map((preset) => {
+                  const exists = categories.some(
+                    (c) => (c.name || '').trim().toLowerCase() === preset.name.toLowerCase(),
+                  );
+                  return (
+                    <button
+                      key={preset.name}
+                      type="button"
+                      disabled={savingCategory || exists}
+                      onClick={() =>
+                        handleQuickCreateCategory(
+                          preset.name,
+                          preset.categoryGroup,
+                          preset.description,
+                          false,
+                        )
+                      }
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                        exists
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200 cursor-default'
+                          : 'bg-slate-50 hover:bg-blue-50 text-slate-800 hover:text-blue-700 border-slate-200 hover:border-blue-300'
+                      }`}
+                    >
+                      {exists ? <Check className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
+                      <span>{preset.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </form>
 
@@ -1176,8 +1383,31 @@ export function AdminProducts({
                     className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Catégorie</label>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="block text-xs font-semibold text-slate-700">Catégorie</label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowInlineNewCat((v) => !v)}
+                        className="text-[11px] font-bold text-blue-700 hover:underline inline-flex items-center gap-0.5"
+                      >
+                        <Plus className="w-3 h-3" />
+                        <span>Nouvelle catégorie</span>
+                      </button>
+                      {formState.categoryId && (
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteCategory(Number(formState.categoryId), true)}
+                          className="text-[11px] font-semibold text-red-600 hover:underline inline-flex items-center gap-0.5"
+                          title="Supprimer la catégorie actuellement sélectionnée"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Supprimer</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
                   <select
                     value={formState.categoryId || ''}
                     onChange={(e) => setFormState({ ...formState, categoryId: e.target.value })}
@@ -1190,6 +1420,73 @@ export function AdminProducts({
                       </option>
                     ))}
                   </select>
+
+                  {/* Inline New Category Creator inside Product Modal */}
+                  {showInlineNewCat && (
+                    <div className="flex items-center gap-1.5 pt-1">
+                      <input
+                        value={inlineNewCatName}
+                        onChange={(e) => setInlineNewCatName(e.target.value)}
+                        placeholder="Ex. Kits oreillettes filaires, Supports..."
+                        className="flex-1 px-2.5 py-1.5 text-xs rounded-lg border border-blue-300 bg-blue-50/40"
+                      />
+                      <button
+                        type="button"
+                        disabled={savingCategory || !inlineNewCatName.trim()}
+                        onClick={() =>
+                          handleQuickCreateCategory(inlineNewCatName, 'accessories', '', true)
+                        }
+                        className="px-2.5 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-800 disabled:opacity-40 text-white text-xs font-bold"
+                      >
+                        Ajouter
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Quick 1-click preset chips right below category select if missing */}
+                  <div className="flex flex-wrap gap-1 pt-0.5">
+                    {QUICK_PRESET_CATEGORIES.slice(0, 4).map((preset) => {
+                      const existing = categories.find(
+                        (c) => (c.name || '').trim().toLowerCase() === preset.name.toLowerCase(),
+                      );
+                      if (existing) {
+                        const isSelected = String(formState.categoryId || '') === String(existing.id);
+                        return (
+                          <button
+                            key={preset.name}
+                            type="button"
+                            onClick={() => setFormState({ ...formState, categoryId: existing.id })}
+                            className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                              isSelected
+                                ? 'bg-blue-700 text-white border-blue-700'
+                                : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                            }`}
+                          >
+                            {preset.name}
+                          </button>
+                        );
+                      }
+                      return (
+                        <button
+                          key={preset.name}
+                          type="button"
+                          disabled={savingCategory}
+                          onClick={() =>
+                            handleQuickCreateCategory(
+                              preset.name,
+                              preset.categoryGroup,
+                              preset.description,
+                              true,
+                            )
+                          }
+                          className="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200"
+                          title={`Créer et sélectionner « ${preset.name} »`}
+                        >
+                          + {preset.name}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
@@ -1347,8 +1644,8 @@ export function AdminProducts({
                       Photos du produit ({(formState.imageUrls || []).length})
                     </h4>
                     <p className="text-[11px] text-slate-500">
-                      Ajoutez vos photos et utilisez <strong>Okwin AI Studio</strong> pour modifier
-                      l’arrière-plan ou générer d’autres images via prompts.
+                      Cliquez sur <strong>⭐ Principale</strong> pour choisir la photo n°1 ou sur{' '}
+                      <strong>×</strong> pour supprimer une photo.
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1377,20 +1674,83 @@ export function AdminProducts({
                 </div>
 
                 {Array.isArray(formState.imageUrls) && formState.imageUrls.length > 0 && (
-                  <div className="flex items-center gap-2.5 overflow-x-auto pb-1">
-                    {formState.imageUrls.map((url: string, idx: number) => (
-                      <div
-                        key={`${url}-${idx}`}
-                        className="relative w-16 h-16 rounded-xl overflow-hidden border border-slate-200 bg-white shrink-0"
-                      >
-                        <ProductImage src={url} alt={`Photo ${idx + 1}`} />
-                        {idx === 0 && (
-                          <span className="absolute bottom-0 inset-x-0 bg-blue-700/90 text-white text-[9px] font-bold text-center py-0.5">
-                            Principale
-                          </span>
-                        )}
-                      </div>
-                    ))}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+                    {formState.imageUrls.map((url: string, idx: number) => {
+                      const isPrimary = idx === 0;
+                      return (
+                        <div
+                          key={`${url}-${idx}`}
+                          className={`rounded-xl overflow-hidden border bg-white flex flex-col ${
+                            isPrimary ? 'border-blue-600 ring-2 ring-blue-500/20' : 'border-slate-200'
+                          }`}
+                        >
+                          <div className="relative aspect-square bg-white">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setLightboxData({
+                                  images: formState.imageUrls.map((u: string, i: number) => ({
+                                    url: u,
+                                    alt: `${formState.name || 'Produit'} - Photo ${i + 1}`,
+                                  })),
+                                  initialIndex: idx,
+                                  title: formState.name || 'Photo du produit',
+                                })
+                              }
+                              className="w-full h-full block cursor-zoom-in"
+                              title="Cliquer pour agrandir la photo"
+                            >
+                              <ProductImage src={url} alt={`Photo ${idx + 1}`} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setLightboxData({
+                                  images: formState.imageUrls.map((u: string, i: number) => ({
+                                    url: u,
+                                    alt: `${formState.name || 'Produit'} - Photo ${i + 1}`,
+                                  })),
+                                  initialIndex: idx,
+                                  title: formState.name || 'Photo du produit',
+                                })
+                              }
+                              className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full bg-slate-900/75 hover:bg-blue-700 text-white flex items-center justify-center"
+                              title="Agrandir l'image"
+                            >
+                              <ZoomIn className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveModalPhoto(url)}
+                              className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-red-600/90 hover:bg-red-700 text-white flex items-center justify-center shadow-xs"
+                              title="Supprimer cette photo"
+                              aria-label={`Supprimer photo ${idx + 1}`}
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          <div className="p-1.5 bg-slate-50 border-t border-slate-100 flex items-center justify-between gap-1">
+                            {isPrimary ? (
+                              <span className="w-full inline-flex items-center justify-center gap-1 py-1 px-2 rounded-lg bg-blue-700 text-white text-[10px] font-bold">
+                                <Check className="w-3 h-3" />
+                                <span>Photo Principale</span>
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleSetModalPhotoPrimary(url)}
+                                className="w-full inline-flex items-center justify-center gap-1 py-1 px-2 rounded-lg bg-white hover:bg-amber-50 text-slate-700 hover:text-amber-800 border border-slate-200 hover:border-amber-300 text-[10px] font-bold transition-colors"
+                                title="Choisir cette photo comme Photo Principale"
+                              >
+                                <Star className="w-3 h-3 text-amber-500" />
+                                <span>Choisir Principale</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
@@ -1405,6 +1765,7 @@ export function AdminProducts({
                       }))
                     }
                     onAddGeneratedImages={handleAttachOkwinImagesToModalProduct}
+                    onSetPrimaryImage={handleSetOkwinImageAsPrimaryInModal}
                   />
                 )}
               </div>
@@ -1452,14 +1813,14 @@ export function AdminProducts({
       {/* Product Multi-Photo Manager Modal */}
       {livePhotoProduct && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="bg-white rounded-xl max-w-xl w-full border border-slate-200 shadow-2xl overflow-hidden">
+          <div className="bg-white rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto border border-slate-200 shadow-2xl">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <div>
                 <h3 className="font-display font-bold text-base text-slate-900">
                   Photos — {livePhotoProduct.name}
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Téléversez directement vos photos depuis votre PC ou téléphone.
+                  Cliquez sur une photo pour l’agrandir, choisissez la photo principale ou supprimez-la.
                 </p>
               </div>
               <button
@@ -1505,22 +1866,62 @@ export function AdminProducts({
                 </button>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                {(livePhotoProduct.images || []).map((img: any) => (
-                  <div key={img.id} className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50">
-                    <div className="aspect-square">
-                      <ProductImage src={img.url} alt={livePhotoProduct.name} />
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {(livePhotoProduct.images || []).map((img: any, idx: number) => (
+                  <div
+                    key={img.id}
+                    className={`border rounded-xl overflow-hidden bg-slate-50 ${
+                      img.isPrimary ? 'border-blue-600 ring-2 ring-blue-500/20' : 'border-slate-200'
+                    }`}
+                  >
+                    <div className="relative aspect-square bg-white">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLightboxData({
+                            images: (livePhotoProduct.images || []).map((im: any, i: number) => ({
+                              url: im.url,
+                              alt: `${livePhotoProduct.name} - Photo ${i + 1}`,
+                            })),
+                            initialIndex: idx,
+                            title: livePhotoProduct.name,
+                          })
+                        }
+                        className="w-full h-full block cursor-zoom-in"
+                        title="Cliquer pour agrandir la photo"
+                      >
+                        <ProductImage src={img.url} alt={livePhotoProduct.name} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLightboxData({
+                            images: (livePhotoProduct.images || []).map((im: any, i: number) => ({
+                              url: im.url,
+                              alt: `${livePhotoProduct.name} - Photo ${i + 1}`,
+                            })),
+                            initialIndex: idx,
+                            title: livePhotoProduct.name,
+                          })
+                        }
+                        className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full bg-slate-900/75 hover:bg-blue-700 text-white flex items-center justify-center"
+                        title="Agrandir l'image"
+                      >
+                        <ZoomIn className="w-3 h-3" />
+                      </button>
                     </div>
                     <div className="p-2 flex items-center justify-between gap-1 bg-white border-t border-slate-100">
                       <button
                         type="button"
                         onClick={() => handleSetPrimaryPhoto(livePhotoProduct.id, img.id)}
-                        className={`inline-flex items-center gap-1 text-[11px] font-medium ${
-                          img.isPrimary ? 'text-blue-700' : 'text-slate-500 hover:text-slate-900'
+                        className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-md ${
+                          img.isPrimary
+                            ? 'bg-blue-700 text-white'
+                            : 'bg-slate-100 text-slate-700 hover:bg-amber-50 hover:text-amber-800'
                         }`}
                       >
-                        {img.isPrimary ? <Check className="w-3 h-3" /> : <Star className="w-3 h-3" />}
-                        <span>{img.isPrimary ? 'Principale' : 'Définir'}</span>
+                        {img.isPrimary ? <Check className="w-3 h-3" /> : <Star className="w-3 h-3 text-amber-500" />}
+                        <span>{img.isPrimary ? 'Principale' : 'Choisir'}</span>
                       </button>
                       <button
                         type="button"
@@ -1537,7 +1938,8 @@ export function AdminProducts({
                       <button
                         type="button"
                         onClick={() => handleDeletePhoto(livePhotoProduct.id, img.id)}
-                        className="text-slate-400 hover:text-red-600"
+                        className="p-1 rounded-md text-red-500 hover:bg-red-50 hover:text-red-700"
+                        title="Supprimer cette photo"
                         aria-label="Supprimer photo"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1581,6 +1983,9 @@ export function AdminProducts({
                       onAddGeneratedImages={(urls) =>
                         handleAttachOkwinImagesToPhotoModal(livePhotoProduct.id, urls)
                       }
+                      onSetPrimaryImage={(url) =>
+                        handleSetOkwinImageAsPrimaryInPhotoModal(livePhotoProduct.id, url)
+                      }
                     />
                   </div>
                 )}
@@ -1588,6 +1993,15 @@ export function AdminProducts({
             </div>
           </div>
         </div>
+      )}
+
+      {lightboxData && (
+        <ImageZoomLightbox
+          images={lightboxData.images}
+          initialIndex={lightboxData.initialIndex}
+          title={lightboxData.title}
+          onClose={() => setLightboxData(null)}
+        />
       )}
     </div>
   );

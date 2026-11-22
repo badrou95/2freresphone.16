@@ -1,18 +1,30 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
+  Eraser,
   ImagePlus,
   Layers,
   Palette,
   Plus,
-  RefreshCw,
+  RotateCcw,
+  ShieldCheck,
   Sparkles,
-  Trash2,
+  Star,
   Wand2,
   X,
+  ZoomIn,
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
+import {
+  BackgroundDiagnosis,
+  computeMagicWandMask,
+  computeSubjectBounds,
+  diagnoseBackgroundType,
+  MattingOptions,
+  processSubjectMatting,
+} from '../../lib/imageMatting';
 import { ProductColorOption } from '../../types';
+import { ImageZoomLightbox } from '../ImageZoomLightbox';
 
 export interface OkwinSceneConfig {
   id: string;
@@ -288,11 +300,13 @@ export function ProductColorsEditor({
   );
 }
 
-// Helper: Remove uniform/corner background from product image on an offscreen canvas
+// Helper: Remove background from product image using Multi-Stage Studio Matting & Anti-Trace De-Halo Engine,
+// apply any optional manual eraser/restore mask, and auto-crop to tight subject bounds for centered podium placement.
 function extractSubjectCanvas(
   img: HTMLImageElement,
   removeBg: boolean,
-  tolerance: number,
+  mattingOpts: MattingOptions,
+  manualMaskCanvas?: HTMLCanvasElement | null,
 ): HTMLCanvasElement {
   const w = img.naturalWidth || img.width || 800;
   const h = img.naturalHeight || img.height || 800;
@@ -309,52 +323,57 @@ function extractSubjectCanvas(
     const imgData = ctx.getImageData(0, 0, w, h);
     const data = imgData.data;
 
-    // Sample corner & border pixels to estimate background color
-    const samplePoints = [
-      [2, 2],
-      [w - 3, 2],
-      [2, h - 3],
-      [w - 3, h - 3],
-      [Math.floor(w / 2), 2],
-      [2, Math.floor(h / 2)],
-      [w - 3, Math.floor(h / 2)],
-    ];
+    processSubjectMatting(data, w, h, mattingOpts);
 
-    let rSum = 0;
-    let gSum = 0;
-    let bSum = 0;
-    let count = 0;
+    // Apply optional manual touch-up mask (Red channel = force erase, Green channel = force restore from original)
+    if (manualMaskCanvas && manualMaskCanvas.width === w && manualMaskCanvas.height === h) {
+      const maskCtx = manualMaskCanvas.getContext('2d');
+      if (maskCtx) {
+        const maskData = maskCtx.getImageData(0, 0, w, h).data;
+        // Also read original image pixels for restore strokes
+        const origCanvas = document.createElement('canvas');
+        origCanvas.width = w;
+        origCanvas.height = h;
+        const origCtx = origCanvas.getContext('2d');
+        origCtx?.drawImage(img, 0, 0, w, h);
+        const origData = origCtx?.getImageData(0, 0, w, h).data;
 
-    for (const [sx, sy] of samplePoints) {
-      const clampedX = Math.max(0, Math.min(w - 1, sx));
-      const clampedY = Math.max(0, Math.min(h - 1, sy));
-      const idx = (clampedY * w + clampedX) * 4;
-      rSum += data[idx];
-      gSum += data[idx + 1];
-      bSum += data[idx + 2];
-      count++;
-    }
-
-    const bgR = rSum / count;
-    const bgG = gSum / count;
-    const bgB = bSum / count;
-    const thresh = tolerance * 1.8;
-    const softRange = 28;
-
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const dist = Math.sqrt((r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2);
-      if (dist < thresh) {
-        data[i + 3] = 0;
-      } else if (dist < thresh + softRange) {
-        const factor = (dist - thresh) / softRange;
-        data[i + 3] = Math.round(data[i + 3] * factor);
+        for (let i = 0; i < data.length; i += 4) {
+          const eraseWeight = maskData[i]; // R = erase
+          const restoreWeight = maskData[i + 1]; // G = restore
+          if (eraseWeight > 10) {
+            const factor = Math.max(0, 1 - eraseWeight / 255);
+            data[i + 3] = Math.round(data[i + 3] * factor);
+          } else if (restoreWeight > 10 && origData) {
+            data[i] = origData[i];
+            data[i + 1] = origData[i + 1];
+            data[i + 2] = origData[i + 2];
+            data[i + 3] = Math.max(data[i + 3], restoreWeight);
+          }
+        }
       }
     }
 
     ctx.putImageData(imgData, 0, 0);
+
+    // Auto-trim transparent borders so the isolated product sits centered on the 3D studio podium
+    const bounds = computeSubjectBounds(data, w, h, 22);
+    if (bounds.width > 12 && bounds.height > 12 && (bounds.width < w || bounds.height < h)) {
+      const pad = Math.round(Math.max(bounds.width, bounds.height) * 0.04);
+      const sx = Math.max(0, bounds.minX - pad);
+      const sy = Math.max(0, bounds.minY - pad);
+      const sw = Math.min(w - sx, bounds.width + pad * 2);
+      const sh = Math.min(h - sy, bounds.height + pad * 2);
+
+      const trimmed = document.createElement('canvas');
+      trimmed.width = sw;
+      trimmed.height = sh;
+      const tCtx = trimmed.getContext('2d');
+      if (tCtx) {
+        tCtx.drawImage(off, sx, sy, sw, sh, 0, 0, sw, sh);
+        return trimmed;
+      }
+    }
   } catch {
     // Fallback if CORS prevents getImageData
   }
@@ -380,7 +399,14 @@ function renderOkwinStudioCanvas(
       ? ctx.createLinearGradient(0, 0, size, size)
       : scene.lightAngle === 'top-right'
       ? ctx.createLinearGradient(size, 0, 0, size)
-      : ctx.createRadialGradient(size * 0.5, size * 0.38, size * 0.08, size * 0.5, size * 0.5, size * 0.78);
+      : ctx.createRadialGradient(
+          size * 0.5,
+          size * 0.38,
+          size * 0.08,
+          size * 0.5,
+          size * 0.5,
+          size * 0.78,
+        );
 
   grad.addColorStop(0, scene.bgSecondary || '#1e3a8a');
   grad.addColorStop(1, scene.bgPrimary || '#0f172a');
@@ -437,7 +463,12 @@ function renderOkwinStudioCanvas(
   ctx.fill();
 
   // Podium top surface
-  const topGrad = ctx.createLinearGradient(podiumX - podiumW * 0.5, podiumY, podiumX + podiumW * 0.5, podiumY);
+  const topGrad = ctx.createLinearGradient(
+    podiumX - podiumW * 0.5,
+    podiumY,
+    podiumX + podiumW * 0.5,
+    podiumY,
+  );
   topGrad.addColorStop(0, scene.podiumColor || '#1e293b');
   topGrad.addColorStop(0.5, scene.bgSecondary || '#334155');
   topGrad.addColorStop(1, scene.podiumColor || '#1e293b');
@@ -480,7 +511,7 @@ function renderOkwinStudioCanvas(
   const drawW = sw * ratio;
   const drawH = sh * ratio;
   const drawX = (size - drawW) / 2;
-  const drawY = podiumY - drawH + 18 + offsetY;
+  const drawY = podiumY - drawH + 14 + offsetY;
 
   // Floor reflection
   if (scene.floorStyle === 'reflection') {
@@ -508,7 +539,7 @@ function renderOkwinStudioCanvas(
   ctx.drawImage(subjectCanvas, drawX, drawY, drawW, drawH);
   ctx.restore();
 
-  return canvas.toDataURL('image/jpeg', 0.92);
+  return canvas.toDataURL('image/jpeg', 0.94);
 }
 
 interface OkwinImageStudioProps {
@@ -516,6 +547,7 @@ interface OkwinImageStudioProps {
   productName?: string;
   onSourceImageUploaded?: (url: string) => void;
   onAddGeneratedImages: (urls: string[]) => void;
+  onSetPrimaryImage?: (url: string) => void;
 }
 
 export function OkwinImageStudio({
@@ -523,17 +555,39 @@ export function OkwinImageStudio({
   productName = 'Produit 2Frères Phone',
   onSourceImageUploaded,
   onAddGeneratedImages,
+  onSetPrimaryImage,
 }: OkwinImageStudioProps) {
   const [selectedPresetId, setSelectedPresetId] = useState<string>(OKWIN_PRESET_PROMPTS[0].id);
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const [removeBg, setRemoveBg] = useState<boolean>(true);
-  const [tolerance, setTolerance] = useState<number>(36);
+  const [mattingMode, setMattingMode] = useState<'auto' | 'complex' | 'flood' | 'global_holes'>('auto');
+  const [bgDiagnosis, setBgDiagnosis] = useState<BackgroundDiagnosis | null>(null);
+  const [subjectPolygon, setSubjectPolygon] = useState<{ x: number; y: number }[] | undefined>(
+    undefined,
+  );
+  const [analyzingSubject, setAnalyzingSubject] = useState<boolean>(false);
+  const [removeShadows, setRemoveShadows] = useState<boolean>(true);
+  const [tolerance, setTolerance] = useState<number>(38);
+  const [edgeChoke, setEdgeChoke] = useState<number>(1.8);
   const [generating, setGenerating] = useState<boolean>(false);
   const [savingUrls, setSavingUrls] = useState<boolean>(false);
   const [uploadingSource, setUploadingSource] = useState<boolean>(false);
   const [previews, setPreviews] = useState<{ label: string; dataUrl: string }[]>([]);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
+
+  // Manual Eraser / Magic Wand / Restore Touch-Up Studio state
+  const [showEraserModal, setShowEraserModal] = useState<boolean>(false);
+  const [brushMode, setBrushMode] = useState<'wand' | 'erase' | 'restore'>('wand');
+  const [brushSize, setBrushSize] = useState<number>(28);
+  const [wandTolerance, setWandTolerance] = useState<number>(32);
+  const [isPainting, setIsPainting] = useState<boolean>(false);
+  const [maskRevision, setMaskRevision] = useState<number>(0);
+
   const loadedImgRef = useRef<HTMLImageElement | null>(null);
+  const manualMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const editorPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const activeScenesRef = useRef<OkwinSceneConfig[]>([]);
 
   const selectedPreset =
     OKWIN_PRESET_PROMPTS.find((p) => p.id === selectedPresetId) || OKWIN_PRESET_PROMPTS[0];
@@ -566,10 +620,26 @@ export function OkwinImageStudio({
     },
   ];
 
+  const getMattingOptions = (): MattingOptions => ({
+    tolerance,
+    mode: mattingMode,
+    removeShadows,
+    removeFloatingTraces: true,
+    edgeChoke,
+    decontaminateColors: 0.92,
+    subjectPolygon,
+  });
+
   const generateFromScenes = (scenes: OkwinSceneConfig[]) => {
     const img = loadedImgRef.current;
     if (!img) return;
-    const subjectCanvas = extractSubjectCanvas(img, removeBg, tolerance);
+    activeScenesRef.current = scenes;
+    const subjectCanvas = extractSubjectCanvas(
+      img,
+      removeBg,
+      getMattingOptions(),
+      manualMaskCanvasRef.current,
+    );
     const rendered = scenes.map((sc) => ({
       label: sc.label,
       dataUrl: renderOkwinStudioCanvas(subjectCanvas, sc, removeBg),
@@ -581,16 +651,269 @@ export function OkwinImageStudio({
   useEffect(() => {
     if (!sourceImageUrl) {
       setPreviews([]);
+      setBgDiagnosis(null);
+      setSubjectPolygon(undefined);
+      manualMaskCanvasRef.current = null;
       return;
     }
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
       loadedImgRef.current = img;
-      generateFromScenes(buildVariationsFromBaseScene(selectedPreset));
+      setSubjectPolygon(undefined);
+      const w = img.naturalWidth || img.width || 800;
+      const h = img.naturalHeight || img.height || 800;
+      // Diagnose whether background is uniform/white or complex/real-world photo
+      try {
+        const diagCanvas = document.createElement('canvas');
+        diagCanvas.width = w;
+        diagCanvas.height = h;
+        const dCtx = diagCanvas.getContext('2d');
+        if (dCtx) {
+          dCtx.drawImage(img, 0, 0, w, h);
+          const diagData = dCtx.getImageData(0, 0, w, h).data;
+          const diag = diagnoseBackgroundType(diagData, w, h);
+          setBgDiagnosis(diag);
+        }
+      } catch {
+        setBgDiagnosis(null);
+      }
+
+      // Initialize blank manual mask canvas matching image dimensions
+      const mask = document.createElement('canvas');
+      mask.width = w;
+      mask.height = h;
+      manualMaskCanvasRef.current = mask;
+      const scenes = buildVariationsFromBaseScene(selectedPreset);
+      activeScenesRef.current = scenes;
+      generateFromScenes(scenes);
     };
     img.src = sourceImageUrl;
-  }, [sourceImageUrl, selectedPresetId, removeBg, tolerance]);
+  }, [sourceImageUrl]);
+
+  // Re-render whenever preset or anti-trace matting controls change
+  useEffect(() => {
+    if (!loadedImgRef.current) return;
+    const scenes =
+      activeScenesRef.current.length > 0 && customPrompt.trim()
+        ? activeScenesRef.current
+        : buildVariationsFromBaseScene(selectedPreset);
+    generateFromScenes(scenes);
+  }, [
+    selectedPresetId,
+    removeBg,
+    mattingMode,
+    removeShadows,
+    tolerance,
+    edgeChoke,
+    maskRevision,
+    subjectPolygon,
+  ]);
+
+  // Render live checkerboard cutout preview inside the manual eraser / magic wand modal
+  useEffect(() => {
+    if (!showEraserModal || !loadedImgRef.current || !editorPreviewCanvasRef.current) return;
+    const img = loadedImgRef.current;
+    const canvas = editorPreviewCanvasRef.current;
+    const w = img.naturalWidth || img.width || 800;
+    const h = img.naturalHeight || img.height || 800;
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Draw high-contrast checkerboard background so any remaining trace is immediately visible
+    const tile = Math.max(12, Math.round(Math.max(w, h) / 32));
+    for (let y = 0; y < h; y += tile) {
+      for (let x = 0; x < w; x += tile) {
+        const isDark = ((x / tile + y / tile) & 1) === 0;
+        ctx.fillStyle = isDark ? '#1e293b' : '#334155';
+        ctx.fillRect(x, y, tile, tile);
+      }
+    }
+
+    // Draw isolated subject without auto-crop so user paints at exact image coordinates
+    const rawOff = document.createElement('canvas');
+    rawOff.width = w;
+    rawOff.height = h;
+    const rCtx = rawOff.getContext('2d');
+    if (rCtx) {
+      rCtx.drawImage(img, 0, 0, w, h);
+      try {
+        const imgData = rCtx.getImageData(0, 0, w, h);
+        const data = imgData.data;
+        processSubjectMatting(data, w, h, getMattingOptions());
+        if (manualMaskCanvasRef.current) {
+          const mCtx = manualMaskCanvasRef.current.getContext('2d');
+          const origCanvas = document.createElement('canvas');
+          origCanvas.width = w;
+          origCanvas.height = h;
+          const oCtx = origCanvas.getContext('2d');
+          oCtx?.drawImage(img, 0, 0, w, h);
+          const origData = oCtx?.getImageData(0, 0, w, h).data;
+          if (mCtx) {
+            const mData = mCtx.getImageData(0, 0, w, h).data;
+            for (let i = 0; i < data.length; i += 4) {
+              if (mData[i] > 10) {
+                data[i + 3] = Math.round(data[i + 3] * Math.max(0, 1 - mData[i] / 255));
+              } else if (mData[i + 1] > 10 && origData) {
+                data[i] = origData[i];
+                data[i + 1] = origData[i + 1];
+                data[i + 2] = origData[i + 2];
+                data[i + 3] = Math.max(data[i + 3], mData[i + 1]);
+              }
+            }
+          }
+        }
+        rCtx.putImageData(imgData, 0, 0);
+      } catch {
+        // ignore
+      }
+      ctx.drawImage(rawOff, 0, 0);
+    }
+  }, [
+    showEraserModal,
+    mattingMode,
+    removeShadows,
+    tolerance,
+    edgeChoke,
+    maskRevision,
+    subjectPolygon,
+  ]);
+
+  const applyMagicWandAt = (x: number, y: number) => {
+    const img = loadedImgRef.current;
+    const maskCanvas = manualMaskCanvasRef.current;
+    if (!img || !maskCanvas) return;
+    const w = maskCanvas.width;
+    const h = maskCanvas.height;
+
+    const origCanvas = document.createElement('canvas');
+    origCanvas.width = w;
+    origCanvas.height = h;
+    const oCtx = origCanvas.getContext('2d');
+    if (!oCtx) return;
+    oCtx.drawImage(img, 0, 0, w, h);
+    const origData = oCtx.getImageData(0, 0, w, h).data;
+
+    const regionMask = computeMagicWandMask(
+      origData,
+      w,
+      h,
+      Math.round(x),
+      Math.round(y),
+      wandTolerance,
+    );
+
+    const mCtx = maskCanvas.getContext('2d');
+    if (!mCtx) return;
+    const maskImgData = mCtx.getImageData(0, 0, w, h);
+    const mData = maskImgData.data;
+
+    for (let idx = 0; idx < w * h; idx++) {
+      if (regionMask[idx] === 1) {
+        const p = idx * 4;
+        mData[p] = 255; // Red = erase
+        mData[p + 1] = 0;
+        mData[p + 2] = 0;
+        mData[p + 3] = 255;
+      }
+    }
+    mCtx.putImageData(maskImgData, 0, 0);
+    setMaskRevision((r) => r + 1);
+  };
+
+  const applyBrushStrokeAt = (e: React.PointerEvent<HTMLCanvasElement>, isInitialClick = false) => {
+    const previewCanvas = editorPreviewCanvasRef.current;
+    const maskCanvas = manualMaskCanvasRef.current;
+    if (!previewCanvas || !maskCanvas) return;
+
+    const rect = previewCanvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    const scaleX = maskCanvas.width / rect.width;
+    const scaleY = maskCanvas.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+
+    if (brushMode === 'wand') {
+      if (isInitialClick) {
+        applyMagicWandAt(x, y);
+      }
+      return;
+    }
+
+    const radius = (brushSize * Math.max(scaleX, scaleY)) / 2;
+
+    const mCtx = maskCanvas.getContext('2d');
+    if (!mCtx) return;
+
+    mCtx.save();
+    mCtx.beginPath();
+    mCtx.arc(x, y, radius, 0, Math.PI * 2);
+    // Red = erase trace, Green = restore subject
+    mCtx.fillStyle = brushMode === 'erase' ? 'rgb(255, 0, 0)' : 'rgb(0, 255, 0)';
+    mCtx.fill();
+    mCtx.restore();
+
+    setMaskRevision((r) => r + 1);
+  };
+
+  const handleResetManualMask = () => {
+    const maskCanvas = manualMaskCanvasRef.current;
+    if (!maskCanvas) return;
+    const mCtx = maskCanvas.getContext('2d');
+    mCtx?.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    setSubjectPolygon(undefined);
+    setMaskRevision((r) => r + 1);
+  };
+
+  // Call Gemini Vision Polygon Contour API for photos with complex/non-white backgrounds
+  const handleAnalyzeSubjectWithAiVision = async () => {
+    const img = loadedImgRef.current;
+    if (!img) return;
+    setAnalyzingSubject(true);
+    setStatusMsg(null);
+    try {
+      const maxDim = 640;
+      const w = img.naturalWidth || img.width || 640;
+      const h = img.naturalHeight || img.height || 640;
+      const scale = Math.min(1, maxDim / Math.max(w, h));
+      const sw = Math.max(64, Math.round(w * scale));
+      const sh = Math.max(64, Math.round(h * scale));
+      const tmp = document.createElement('canvas');
+      tmp.width = sw;
+      tmp.height = sh;
+      const tCtx = tmp.getContext('2d');
+      tCtx?.drawImage(img, 0, 0, sw, sh);
+      const imageDataUrl = tmp.toDataURL('image/jpeg', 0.85);
+
+      const res = await adminFetch<{
+        polygon: { x: number; y: number }[];
+        source: string;
+        backgroundType?: string;
+      }>('/api/admin/okwin/analyze-subject', {
+        method: 'POST',
+        body: JSON.stringify({
+          imageDataUrl,
+          productName,
+        }),
+      });
+
+      if (Array.isArray(res.polygon) && res.polygon.length >= 3) {
+        setRemoveBg(true);
+        setMattingMode('complex');
+        setSubjectPolygon(res.polygon);
+        setStatusMsg(
+          'Détourage IA Vision appliqué : la silhouette du produit a été isolée de l’arrière-plan complexe.',
+        );
+      }
+    } catch (err: any) {
+      setStatusMsg(err?.message || 'Erreur lors de l’analyse IA Vision du contour.');
+    } finally {
+      setAnalyzingSubject(false);
+    }
+  };
 
   const handleUploadSourceFile = async (file: File | undefined) => {
     if (!file) return;
@@ -682,13 +1005,18 @@ export function OkwinImageStudio({
     return uploaded.url;
   };
 
-  const handleSaveOneVariation = async (dataUrl: string, idx: number) => {
+  const handleSaveOneVariation = async (dataUrl: string, idx: number, asPrimary = false) => {
     setSavingUrls(true);
     setStatusMsg(null);
     try {
       const url = await uploadDataUrlToMedia(dataUrl, idx);
-      onAddGeneratedImages([url]);
-      setStatusMsg('Image Okwin Studio ajoutée avec succès à la galerie du produit !');
+      if (asPrimary && onSetPrimaryImage) {
+        onSetPrimaryImage(url);
+        setStatusMsg('Photo Okwin Studio définie comme PHOTO PRINCIPALE du produit !');
+      } else {
+        onAddGeneratedImages([url]);
+        setStatusMsg('Image Okwin Studio ajoutée avec succès à la galerie du produit !');
+      }
     } catch (err: any) {
       setStatusMsg(err?.message || 'Impossible d’enregistrer l’image générée.');
     } finally {
@@ -717,20 +1045,41 @@ export function OkwinImageStudio({
     }
   };
 
+  const isComplexBgDetected = bgDiagnosis && !bgDiagnosis.isWhiteOrUniform;
+
   return (
     <div className="rounded-2xl border-2 border-indigo-600/80 bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950 text-white p-5 space-y-5 shadow-md">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
         <div className="space-y-1">
-          <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 text-[11px] font-bold uppercase tracking-wider">
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Okwin AI Photo Studio · Arrière-plan &amp; Multi-Images</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 text-[11px] font-bold uppercase tracking-wider">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Okwin AI Photo Studio Pro · Fonds Blancs &amp; Fonds Complexes</span>
+            </div>
+            {bgDiagnosis && (
+              <span
+                className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-[11px] font-bold ${
+                  bgDiagnosis.isWhiteOrUniform
+                    ? 'bg-emerald-500/20 border border-emerald-400/40 text-emerald-300'
+                    : 'bg-amber-500/20 border border-amber-400/40 text-amber-300'
+                }`}
+              >
+                <ShieldCheck className="w-3 h-3" />
+                <span>
+                  {bgDiagnosis.isWhiteOrUniform
+                    ? 'Fond Blanc / Uni détecté · Détourage Studio Ultra-Net'
+                    : 'Fond Complexe / Photo Boutique détecté · Moteur Intelligent Actif'}
+                </span>
+              </span>
+            )}
           </div>
           <h4 className="font-display font-bold text-base text-white">
-            Modifiez l’arrière-plan de votre produit &amp; générez d’autres images via Prompts
+            Détourage Intelligent (Fonds Blancs + Photos Réelles Sans Fond Blanc) &amp; Studio 3D
           </h4>
           <p className="text-xs text-slate-300">
-            Choisissez un décor studio prédéfini ou écrivez votre propre prompt personnalisé pour
-            générer 4 nouvelles photos professionnelles de votre produit.
+            Détecte automatiquement si votre photo a déjà un fond blanc ou un fond complexe (table,
+            comptoir, boutique), bouche les trous internes et permet de choisir n’importe quelle
+            photo générée comme <strong>Photo Principale</strong>.
           </p>
         </div>
 
@@ -765,7 +1114,7 @@ export function OkwinImageStudio({
         <div className="py-8 text-center space-y-3 border border-dashed border-slate-700 rounded-xl bg-slate-900/50">
           <p className="text-xs text-slate-300">
             Téléversez d’abord une première photo de votre produit pour activer le studio
-            d’arrière-plan <strong>Okwin AI</strong>.
+            d’arrière-plan <strong>Okwin AI Pro</strong>.
           </p>
           {onSourceImageUploaded && (
             <label className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold cursor-pointer">
@@ -845,31 +1194,254 @@ export function OkwinImageStudio({
             </div>
           </div>
 
-          {/* 3. Background Isolation Controls */}
-          <div className="flex flex-wrap items-center justify-between gap-4 pt-1 text-xs text-slate-300">
-            <label className="inline-flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={removeBg}
-                onChange={(e) => setRemoveBg(e.target.checked)}
-                className="w-4 h-4 rounded border-slate-600 text-indigo-500"
-              />
-              <span className="font-semibold">
-                Détourer automatiquement l’arrière-plan d’origine du produit
-              </span>
-            </label>
+          {/* 3. Pro Dual-Engine Background Isolation (White Background vs Complex Non-White Background) */}
+          <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <span className="text-xs font-bold text-white">
+                  3. Mode de Détourage (Fonds Blancs &amp; Photos Sans Fond Blanc) :
+                </span>
+                <div className="inline-flex flex-wrap rounded-lg bg-slate-900 p-0.5 border border-slate-700 gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRemoveBg(true);
+                      setMattingMode('auto');
+                    }}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
+                      removeBg && mattingMode === 'auto'
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    Auto Intelligent ({isComplexBgDetected ? 'Fond Complexe' : 'Fond Blanc'})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRemoveBg(true);
+                      setMattingMode('complex');
+                    }}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
+                      removeBg && mattingMode === 'complex'
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    Photo Sans Fond Blanc (Complexe)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRemoveBg(true);
+                      setMattingMode('flood');
+                    }}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
+                      removeBg && mattingMode === 'flood'
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    Studio Fond Blanc
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRemoveBg(false)}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
+                      !removeBg ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    Cadre Vitrine 3D (Garder le fond)
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {removeBg && (
+                  <button
+                    type="button"
+                    disabled={analyzingSubject}
+                    onClick={handleAnalyzeSubjectWithAiVision}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white shadow-xs transition-colors"
+                    title="Utilise Gemini Vision pour tracer la silhouette du produit sur les photos difficiles sans fond blanc"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 ${analyzingSubject ? 'animate-spin' : ''}`} />
+                    <span>
+                      {analyzingSubject
+                        ? 'Analyse IA...'
+                        : subjectPolygon
+                        ? 'Silhouette IA Active ✓'
+                        : 'Détourage IA Vision (Fond Complexe)'}
+                    </span>
+                  </button>
+                )}
+
+                {removeBg && (
+                  <button
+                    type="button"
+                    onClick={() => setShowEraserModal((v) => !v)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${
+                      showEraserModal
+                        ? 'bg-amber-500 text-slate-950 border-amber-400'
+                        : 'bg-slate-800 hover:bg-slate-700 text-amber-300 border-amber-500/40'
+                    }`}
+                  >
+                    <Eraser className="w-3.5 h-3.5" />
+                    <span>
+                      {showEraserModal
+                        ? 'Fermer Baguette & Gomme'
+                        : 'Baguette Magique 1-Clic & Gomme'}
+                    </span>
+                  </button>
+                )}
+              </div>
+            </div>
 
             {removeBg && (
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-400">Précision du détourage :</span>
-                <input
-                  type="range"
-                  min={12}
-                  max={85}
-                  value={tolerance}
-                  onChange={(e) => setTolerance(Number(e.target.value))}
-                  className="w-28 accent-indigo-400"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-800/80 text-xs">
+                <label className="inline-flex items-center gap-2 cursor-pointer text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={removeShadows}
+                    onChange={(e) => setRemoveShadows(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-600 text-indigo-500"
+                  />
+                  <span>Supprimer ombres &amp; traces de table</span>
+                </label>
+
+                <div className="flex items-center justify-between sm:justify-start gap-2">
+                  <span className="text-[11px] text-slate-300 whitespace-nowrap">
+                    Puissance détourage ({tolerance}) :
+                  </span>
+                  <input
+                    type="range"
+                    min={14}
+                    max={85}
+                    value={tolerance}
+                    onChange={(e) => setTolerance(Number(e.target.value))}
+                    className="w-28 accent-indigo-400"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between sm:justify-start gap-2">
+                  <span className="text-[11px] text-slate-300 whitespace-nowrap">
+                    Finesse Anti-Halo ({edgeChoke.toFixed(1)}px) :
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={3.5}
+                    step={0.5}
+                    value={edgeChoke}
+                    onChange={(e) => setEdgeChoke(Number(e.target.value))}
+                    className="w-28 accent-emerald-400"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Manual Magic Wand / Eraser / Restore Interactive Canvas Panel */}
+            {removeBg && showEraserModal && (
+              <div className="p-3.5 rounded-xl bg-slate-900 border border-amber-500/40 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-bold text-amber-300">
+                      Outil de Retouche Directe :
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setBrushMode('wand')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1 ${
+                        brushMode === 'wand'
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                      }`}
+                    >
+                      <Wand2 className="w-3 h-3" />
+                      <span>Baguette Magique (1 clic = effacer une zone de fond)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBrushMode('erase')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                        brushMode === 'erase'
+                          ? 'bg-red-600 text-white'
+                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                      }`}
+                    >
+                      Gomme (Pinceau)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBrushMode('restore')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                        brushMode === 'restore'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                      }`}
+                    >
+                      Restaurer le produit
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    {brushMode === 'wand' ? (
+                      <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
+                        <span>Tolérance baguette ({wandTolerance}) :</span>
+                        <input
+                          type="range"
+                          min={12}
+                          max={75}
+                          value={wandTolerance}
+                          onChange={(e) => setWandTolerance(Number(e.target.value))}
+                          className="w-20 accent-indigo-400"
+                        />
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
+                        <span>Taille pinceau :</span>
+                        <input
+                          type="range"
+                          min={8}
+                          max={80}
+                          value={brushSize}
+                          onChange={(e) => setBrushSize(Number(e.target.value))}
+                          className="w-20 accent-amber-400"
+                        />
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleResetManualMask}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-200"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Réinitialiser</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex justify-center bg-slate-950 rounded-xl p-2 border border-slate-800">
+                  <canvas
+                    ref={editorPreviewCanvasRef}
+                    onPointerDown={(e) => {
+                      setIsPainting(true);
+                      applyBrushStrokeAt(e, true);
+                    }}
+                    onPointerMove={(e) => {
+                      if (isPainting && brushMode !== 'wand') applyBrushStrokeAt(e, false);
+                    }}
+                    onPointerUp={() => setIsPainting(false)}
+                    onPointerLeave={() => setIsPainting(false)}
+                    className="max-h-72 w-auto object-contain rounded-lg cursor-crosshair touch-none"
+                  />
+                </div>
+                <p className="text-[11px] text-slate-400 text-center">
+                  {brushMode === 'wand'
+                    ? 'Cliquez simplement sur n’importe quel morceau d’arrière-plan restant pour l’effacer d’un seul clic.'
+                    : 'Passez la souris ou le doigt sur le damier pour effacer une trace ou restaurer une partie du produit.'}
+                </p>
               </div>
             )}
           </div>
@@ -879,7 +1451,7 @@ export function OkwinImageStudio({
             <div className="space-y-3 pt-2 border-t border-slate-800">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-bold text-indigo-200">
-                  4 nouvelles images générées pour votre produit :
+                  4 nouvelles images générées (cliquez sur une photo pour l’agrandir ou choisissez-la comme Principale) :
                 </span>
                 <button
                   type="button"
@@ -900,28 +1472,56 @@ export function OkwinImageStudio({
                 {previews.map((item, idx) => (
                   <div
                     key={idx}
-                    className="rounded-xl overflow-hidden border border-slate-700 bg-slate-800 flex flex-col"
+                    className="rounded-xl overflow-hidden border border-slate-700 bg-slate-800 flex flex-col group"
                   >
                     <div className="aspect-square w-full bg-slate-950 relative">
-                      <img
-                        src={item.dataUrl}
-                        alt={item.label}
-                        className="w-full h-full object-cover"
-                      />
+                      <button
+                        type="button"
+                        onClick={() => setLightboxIdx(idx)}
+                        aria-label={`Agrandir ${item.label}`}
+                        className="w-full h-full block cursor-zoom-in focus:outline-none"
+                      >
+                        <img
+                          src={item.dataUrl}
+                          alt={item.label}
+                          className="w-full h-full object-contain transition-transform duration-200 group-hover:scale-[1.02]"
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLightboxIdx(idx)}
+                        aria-label={`Voir ${item.label} en plein écran`}
+                        title="Agrandir pour voir l'intégralité de la photo"
+                        className="absolute top-2 right-2 p-1.5 rounded-lg bg-slate-900/80 hover:bg-indigo-600 text-white text-xs backdrop-blur-xs shadow transition-colors"
+                      >
+                        <ZoomIn className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                     <div className="p-2 flex flex-col gap-1.5 justify-between flex-1">
                       <p className="text-[11px] font-medium text-slate-200 truncate">
                         {item.label}
                       </p>
-                      <button
-                        type="button"
-                        disabled={savingUrls}
-                        onClick={() => handleSaveOneVariation(item.dataUrl, idx)}
-                        className="w-full py-1.5 px-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-[11px] font-bold flex items-center justify-center gap-1"
-                      >
-                        <Plus className="w-3 h-3" />
-                        <span>Utiliser cette photo</span>
-                      </button>
+                      <div className="flex flex-col gap-1">
+                        <button
+                          type="button"
+                          disabled={savingUrls}
+                          onClick={() => handleSaveOneVariation(item.dataUrl, idx, true)}
+                          className="w-full py-1.5 px-2 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-[11px] font-bold flex items-center justify-center gap-1 shadow-2xs"
+                          title="Définir immédiatement cette image Okwin comme Photo Principale du produit"
+                        >
+                          <Star className="w-3 h-3 fill-slate-950" />
+                          <span>Choisir Principale</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={savingUrls}
+                          onClick={() => handleSaveOneVariation(item.dataUrl, idx, false)}
+                          className="w-full py-1.5 px-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-[11px] font-bold flex items-center justify-center gap-1"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>Ajouter galerie</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -930,6 +1530,16 @@ export function OkwinImageStudio({
           )}
         </>
       )}
+
+      {lightboxIdx !== null && previews.length > 0 && (
+        <ImageZoomLightbox
+          images={previews.map((p) => ({ url: p.dataUrl, alt: p.label }))}
+          initialIndex={lightboxIdx}
+          title={previews[lightboxIdx]?.label || productName}
+          onClose={() => setLightboxIdx(null)}
+        />
+      )}
     </div>
   );
 }
+

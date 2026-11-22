@@ -17,8 +17,9 @@ import {
 } from 'lucide-react';
 import { adminFetch } from '../../lib/api';
 import { loadPrinterConfig, printPurchaseReceipt } from '../../lib/printer';
-import { formatDzd, toCsv } from '../../shared/domain';
+import { calculateFinancialSummary, formatDzd, toCsv } from '../../shared/domain';
 import { StarRating } from '../StarRating';
+import { FinancialMarginWidget } from './FinancialMarginWidget';
 
 // ---------------------------------------------------------------------------
 // 3. SALES LEDGER
@@ -26,12 +27,14 @@ import { StarRating } from '../StarRating';
 export function AdminSales({
   sales,
   orders = [],
+  products = [],
   accountingEntries = [],
   storeSettings,
   onOpenMdfImport,
 }: {
   sales: any[];
   orders?: any[];
+  products?: any[];
   accountingEntries?: any[];
   storeSettings?: any;
   onOpenMdfImport?: () => void;
@@ -46,43 +49,92 @@ export function AdminSales({
     );
   }, [sales, search]);
 
+  const realStockSummary = useMemo(() => calculateFinancialSummary(products || []), [products]);
+
   const comptaTotals = useMemo(() => {
     return (accountingEntries || []).reduce(
-      (acc: { stockValuationDzd: number; stockMarginDzd: number; salesDzd: number }, e: any) => {
+      (
+        acc: {
+          stockValuationDzd: number;
+          stockCostDzd: number;
+          stockMarginDzd: number;
+          salesDzd: number;
+          salesCostDzd: number;
+          salesMarginDzd: number;
+        },
+        e: any,
+      ) => {
         if (e.entryType === 'stock_valuation') {
           acc.stockValuationDzd += Number(e.amountDzd || 0);
+          acc.stockCostDzd += Number(e.costDzd || 0);
           acc.stockMarginDzd += Number(e.marginDzd || 0);
         } else if (e.entryType === 'sale') {
           acc.salesDzd += Number(e.amountDzd || 0);
+          acc.salesCostDzd += Number(e.costDzd || 0);
+          acc.salesMarginDzd += Number(e.marginDzd || 0);
         }
         return acc;
       },
-      { stockValuationDzd: 0, stockMarginDzd: 0, salesDzd: 0 },
+      {
+        stockValuationDzd: 0,
+        stockCostDzd: 0,
+        stockMarginDzd: 0,
+        salesDzd: 0,
+        salesCostDzd: 0,
+        salesMarginDzd: 0,
+      },
     );
   }, [accountingEntries]);
+
+  // Valeur du stock réel au prix d'achat (prix de revient) : priorité au stock physique réel en base, ou fallback écritures compta
+  const displayStockCostDzd =
+    realStockSummary.totalCostValueDzd > 0
+      ? realStockSummary.totalCostValueDzd
+      : comptaTotals.stockCostDzd;
+  const displayStockSaleDzd =
+    realStockSummary.totalSaleValueDzd > 0
+      ? realStockSummary.totalSaleValueDzd
+      : comptaTotals.stockValuationDzd;
+  const displayStockMarginDzd =
+    realStockSummary.totalSaleValueDzd > 0 || realStockSummary.totalCostValueDzd > 0
+      ? realStockSummary.totalGrossMarginDzd
+      : comptaTotals.stockMarginDzd;
 
   const totals = useMemo(() => {
     return filtered.reduce(
       (acc, s) => {
         acc.collected += Number(s.totalCollectedDzd || 0);
         acc.items += Number(s.itemsRevenueDzd || 0);
+        acc.costOfGoods += Number(s.costOfGoodsDzd || 0);
         acc.shipping += Number(s.shippingFeeDzd || 0);
         acc.margin += Number(s.estimatedMarginDzd || 0);
         return acc;
       },
-      { collected: 0, items: 0, shipping: 0, margin: 0 },
+      { collected: 0, items: 0, costOfGoods: 0, shipping: 0, margin: 0 },
     );
   }, [filtered]);
 
   const handleExport = () => {
     const csv = toCsv(
-      ['Référence', 'Date', 'Client', 'Wilaya', 'Articles DZD', 'Remise DZD', 'Livraison DZD', 'Encaissé DZD', 'Marge estimée DZD'],
+      [
+        'Référence',
+        'Date',
+        'Client',
+        'Wilaya',
+        'Articles DZD',
+        'Prix de revient (Achat) DZD',
+        'Remise DZD',
+        'Livraison DZD',
+        'Encaissé DZD',
+        'Marge estimée DZD',
+      ],
       filtered.map((s) => [
         s.orderReference,
         new Date(s.recordedAt).toLocaleDateString('fr-FR'),
         s.customerName,
         s.wilayaName,
         s.itemsRevenueDzd,
+        s.costOfGoodsDzd ?? 0,
         s.discountDzd,
         s.shippingFeeDzd,
         s.totalCollectedDzd,
@@ -107,9 +159,11 @@ export function AdminSales({
               Comptabilité &amp; Sauvegarde Base de Données (.MDF + .IDF)
             </p>
             <p className="text-xs text-slate-600 mt-0.5">
-              {accountingEntries.length > 0
-                ? `${accountingEntries.length} écriture(s) comptable(s) active(s) · Valorisation Stock : ${formatDzd(comptaTotals.stockValuationDzd)} · Marge Stock : +${formatDzd(comptaTotals.stockMarginDzd)}`
-                : 'Importez vos fichiers .mdf et .idf pour générer automatiquement tout votre stock et votre comptabilité.'}
+              Stock réel au prix d’achat (prix de revient) :{' '}
+              <strong className="font-mono text-red-600">{formatDzd(displayStockCostDzd)}</strong> · Valorisation vente :{' '}
+              <strong className="font-mono text-blue-700">{formatDzd(displayStockSaleDzd)}</strong> · Marge stock :{' '}
+              <strong className="font-mono text-emerald-700">+{formatDzd(displayStockMarginDzd)}</strong>
+              {accountingEntries.length > 0 && ` (${accountingEntries.length} écriture(s) comptable(s))`}
             </p>
           </div>
           <button
@@ -122,11 +176,14 @@ export function AdminSales({
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4">
           <p className="text-xs text-slate-500">Total encaissé (Livrées + Compta)</p>
           <p className="mt-1 font-mono font-bold text-xl text-slate-900 tabular-nums">
             {formatDzd(totals.collected + comptaTotals.salesDzd)}
+          </p>
+          <p className="text-[11px] text-slate-400 mt-0.5">
+            Commandes livrées : {formatDzd(totals.collected)}
           </p>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
@@ -134,20 +191,52 @@ export function AdminSales({
           <p className="mt-1 font-mono font-bold text-xl text-slate-900 tabular-nums">
             {formatDzd(totals.items)}
           </p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-500">Valorisation Stock (Compta .MDF/.IDF)</p>
-          <p className="mt-1 font-mono font-bold text-xl text-blue-700 tabular-nums">
-            {formatDzd(comptaTotals.stockValuationDzd)}
+          <p className="text-[11px] text-slate-400 mt-0.5">
+            Prix de revient vendus : {formatDzd(totals.costOfGoods)}
           </p>
         </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-500">Marge brute cumulée</p>
+        <div className="bg-red-50/50 border border-red-200 rounded-xl p-4">
+          <p className="text-xs font-bold text-red-900">
+            Valeur Stock Réel (Prix d’achat / Revient)
+          </p>
+          <p className="mt-1 font-mono font-bold text-xl text-red-600 tabular-nums">
+            {formatDzd(displayStockCostDzd)}
+          </p>
+          <p className="text-[11px] text-red-800 mt-0.5">
+            {realStockSummary.valuedProductsCount} réf. en stock ({realStockSummary.totalUnits} u.)
+          </p>
+        </div>
+        <div className="bg-blue-50/50 border border-blue-200 rounded-xl p-4">
+          <p className="text-xs font-bold text-blue-900">
+            Valorisation Stock (Prix de vente)
+          </p>
+          <p className="mt-1 font-mono font-bold text-xl text-blue-700 tabular-nums">
+            {formatDzd(displayStockSaleDzd)}
+          </p>
+          <p className="text-[11px] text-blue-800 mt-0.5">
+            {comptaTotals.stockValuationDzd > 0
+              ? `Compta .MDF/.IDF : ${formatDzd(comptaTotals.stockValuationDzd)}`
+              : 'Valeur catalogue du stock réel'}
+          </p>
+        </div>
+        <div className="bg-emerald-50/50 border border-emerald-200 rounded-xl p-4">
+          <p className="text-xs font-bold text-emerald-900">Marge brute cumulée</p>
           <p className="mt-1 font-mono font-bold text-xl text-emerald-700 tabular-nums">
-            {formatDzd(totals.margin + comptaTotals.stockMarginDzd)}
+            {formatDzd(totals.margin + comptaTotals.salesMarginDzd + displayStockMarginDzd)}
+          </p>
+          <p className="text-[11px] text-emerald-800 mt-0.5">
+            Ventes : +{formatDzd(totals.margin + comptaTotals.salesMarginDzd)} · Stock : +{formatDzd(displayStockMarginDzd)}
           </p>
         </div>
       </div>
+
+      {/* Detailed Real Stock Cost vs Selling Value & Gross Margin Widget */}
+      <FinancialMarginWidget
+        items={products}
+        title="Bilan du Stock Réel : Prix d’Achat (Prix de Revient) vs Prix de Vente & Marge Brute"
+        subtitle="Calculé en temps réel sur votre stock physique disponible (Quantité en stock × Prix d’achat unitaire vs Prix de vente)"
+        onGoToStock={onOpenMdfImport}
+      />
 
       <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
         <div className="relative min-w-[220px] flex-1 max-w-sm">
@@ -179,6 +268,7 @@ export function AdminSales({
                 <th className="py-3 px-4 font-semibold">Date</th>
                 <th className="py-3 px-4 font-semibold">Client</th>
                 <th className="py-3 px-4 font-semibold">Wilaya</th>
+                <th className="py-3 px-4 font-semibold text-right">Prix de revient (Achat)</th>
                 <th className="py-3 px-4 font-semibold text-right">Encaissé</th>
                 <th className="py-3 px-4 font-semibold text-right">Marge estimée</th>
                 <th className="py-3 px-4 font-semibold text-right">Reçu</th>
@@ -187,7 +277,7 @@ export function AdminSales({
             <tbody className="divide-y divide-slate-100">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-xs text-slate-500">
+                  <td colSpan={8} className="py-10 text-center text-xs text-slate-500">
                     Aucune vente enregistrée. Une vente est automatiquement comptabilisée lorsqu’une commande passe au statut « Livrée ».
                   </td>
                 </tr>
@@ -202,6 +292,9 @@ export function AdminSales({
                     </td>
                     <td className="py-3 px-4 text-slate-800 font-medium">{s.customerName}</td>
                     <td className="py-3 px-4 text-slate-600">{s.wilayaName}</td>
+                    <td className="py-3 px-4 text-right font-mono font-semibold text-red-600 tabular-nums">
+                      {formatDzd(s.costOfGoodsDzd || 0)}
+                    </td>
                     <td className="py-3 px-4 text-right font-mono font-semibold text-slate-900 tabular-nums">
                       {formatDzd(s.totalCollectedDzd)}
                     </td>

@@ -1043,9 +1043,18 @@ export function createApp() {
       const pendingPipelineDzd = allOrders
         .filter((o) => !['livree', 'annulee', 'retournee'].includes(o.status))
         .reduce((acc, o) => acc + o.totalDzd, 0);
-      const stockValuationDzd = allProducts
-        .filter((p) => p.productType === 'physical')
-        .reduce((acc, p) => acc + p.stockQuantity * p.priceDzd, 0);
+      const physicalProductsList = allProducts.filter(
+        (p) => p.productType === 'physical' && Math.max(0, Number(p.stockQuantity) || 0) > 0,
+      );
+      const stockValuationDzd = physicalProductsList.reduce(
+        (acc, p) => acc + Math.max(0, Number(p.stockQuantity) || 0) * Math.max(0, Number(p.priceDzd) || 0),
+        0,
+      );
+      const stockCostValuationDzd = physicalProductsList.reduce(
+        (acc, p) => acc + Math.max(0, Number(p.stockQuantity) || 0) * Math.max(0, Number(p.costPriceDzd) || 0),
+        0,
+      );
+      const stockLatentMarginDzd = stockValuationDzd - stockCostValuationDzd;
 
       // Build last 14 days real chart series
       const dayMap = new Map<string, { date: string; commandes: number; ventesDzd: number }>();
@@ -1090,6 +1099,8 @@ export function createApp() {
           productsWithoutPhotos,
           totalCustomers: allCustomers.length,
           stockValuationDzd,
+          stockCostValuationDzd,
+          stockLatentMarginDzd,
           activeLowStockCount: activeAlerts.length,
           pendingReviewsCount: pendingReviews[0]?.count ?? 0,
           pendingDigitalCount: pendingDigital[0]?.count ?? 0,
@@ -1614,12 +1625,23 @@ export function createApp() {
       if (!name || !String(name).trim()) {
         return res.status(400).json({ error: 'Le nom de catégorie est obligatoire.' });
       }
-      const slug = slugify(String(name));
+      const trimmedName = String(name).trim();
+      const baseSlug = slugify(trimmedName) || `cat-${Date.now()}`;
+      const existingBySlug = await db.select().from(categories).where(eq(categories.slug, baseSlug));
+      if (
+        existingBySlug.length > 0 &&
+        existingBySlug[0].name.trim().toLowerCase() === trimmedName.toLowerCase()
+      ) {
+        return res.status(200).json({ category: existingBySlug[0] });
+      }
+      const finalSlug =
+        existingBySlug.length > 0 ? `${baseSlug}-${Math.floor(100 + Math.random() * 900)}` : baseSlug;
+
       const [created] = await db
         .insert(categories)
         .values({
-          name: String(name).trim(),
-          slug,
+          name: trimmedName,
+          slug: finalSlug,
           categoryGroup: categoryGroup || 'accessories',
           description: description || null,
           sortOrder: Number(sortOrder) || 0,
@@ -1628,7 +1650,7 @@ export function createApp() {
         .returning();
       return res.status(201).json({ category: created });
     } catch (error: any) {
-      return res.status(400).json({ error: 'Impossible de créer cette catégorie (nom ou slug déjà existant).' });
+      return res.status(400).json({ error: 'Impossible de créer cette catégorie.' });
     }
   });
 
@@ -1644,7 +1666,7 @@ export function createApp() {
         .update(categories)
         .set({
           name: nextName,
-          slug: name ? slugify(nextName) : existing.slug,
+          slug: name ? slugify(nextName) || existing.slug : existing.slug,
           categoryGroup: categoryGroup || existing.categoryGroup,
           description: description !== undefined ? description : existing.description,
           sortOrder: sortOrder !== undefined ? Number(sortOrder) : existing.sortOrder,
@@ -1662,6 +1684,7 @@ export function createApp() {
     try {
       const id = Number(req.params.id);
       await db.update(storeSettings).set({ catalogInitialized: true });
+      await db.update(products).set({ categoryId: null }).where(eq(products.categoryId, id));
       await db.delete(categories).where(eq(categories.id, id));
       return res.json({ deleted: true });
     } catch (error) {
@@ -1686,6 +1709,7 @@ export function createApp() {
       }
 
       await db.update(storeSettings).set({ catalogInitialized: true });
+      await db.update(products).set({ categoryId: null }).where(inArray(products.categoryId, uniqueIds));
       const deletedRows = await db
         .delete(categories)
         .where(inArray(categories.id, uniqueIds))
@@ -1882,6 +1906,27 @@ export function createApp() {
         });
       }
 
+      // Sync productImages whenever imageUrls array is passed in PATCH body (supports deleting & setting primary photo!)
+      if (Array.isArray(b.imageUrls)) {
+        const cleanUrls = Array.from(
+          new Set(
+            b.imageUrls
+              .map((u: unknown) => String(u || '').trim())
+              .filter(Boolean),
+          ),
+        ) as string[];
+        await db.delete(productImages).where(eq(productImages.productId, id));
+        for (let i = 0; i < cleanUrls.length; i++) {
+          await db.insert(productImages).values({
+            productId: id,
+            url: cleanUrls[i],
+            altText: updated.name,
+            sortOrder: i,
+            isPrimary: i === 0,
+          });
+        }
+      }
+
       await evaluateProductLowStock(id);
       return res.json({ product: updated });
     } catch (error) {
@@ -2048,6 +2093,20 @@ export function createApp() {
       await db
         .delete(productImages)
         .where(and(eq(productImages.id, imageId), eq(productImages.productId, productId)));
+
+      // If remaining photos exist and none is marked isPrimary, promote the first one automatically
+      const remaining = await db
+        .select()
+        .from(productImages)
+        .where(eq(productImages.productId, productId))
+        .orderBy(desc(productImages.isPrimary), asc(productImages.sortOrder));
+      if (remaining.length > 0 && !remaining.some((img) => img.isPrimary)) {
+        await db
+          .update(productImages)
+          .set({ isPrimary: true })
+          .where(eq(productImages.id, remaining[0].id));
+      }
+
       return res.json({ deleted: true });
     } catch (error) {
       return res.status(500).json({ error: 'Erreur suppression photo.' });
@@ -4113,6 +4172,83 @@ Génère 4 variations visuelles complémentaires (codes couleurs hexadécimaux #
     } catch (err) {
       console.warn('Okwin Gemini prompt fallback:', err);
       return res.json({ variations: defaultVariations, source: 'preset' });
+    }
+  });
+
+  // Admin: Okwin AI Studio — Analyze non-white / complex background photo with Gemini Vision to return a subject contour polygon
+  app.post('/api/admin/okwin/analyze-subject', requireAdmin, async (req, res) => {
+    const b = req.body || {};
+    const imageBase64 = String(b.imageBase64 || '').replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '');
+    const mimeType = String(b.mimeType || 'image/jpeg');
+    const productName = String(b.productName || 'Produit').trim();
+
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    if (!apiKey || !imageBase64) {
+      return res.json({ polygon: null, source: 'local' });
+    }
+
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [
+          {
+            inlineData: {
+              mimeType,
+              data: imageBase64,
+            },
+          },
+          {
+            text: `Identify the main foreground product ("${productName}") in this photo and trace its outer silhouette boundary as a tight polygon of 12 to 20 points in clockwise order.
+Return normalized coordinates where x and y are floats between 0.0 and 1.0 (0,0 is top-left, 1,1 is bottom-right). Exclude table surfaces, walls, shelves, and background clutter.`,
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              polygon: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    x: { type: Type.NUMBER },
+                    y: { type: Type.NUMBER },
+                  },
+                  required: ['x', 'y'],
+                },
+              },
+            },
+            required: ['polygon'],
+          },
+        },
+      });
+
+      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const rawPoly = Array.isArray(parsed.polygon) ? parsed.polygon : [];
+      const cleanPoly = rawPoly
+        .map((pt: any) => ({
+          x: Math.max(0, Math.min(1, Number(pt?.x) || 0)),
+          y: Math.max(0, Math.min(1, Number(pt?.y) || 0)),
+        }))
+        .filter((pt: { x: number; y: number }) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+
+      return res.json({
+        polygon: cleanPoly.length >= 4 ? cleanPoly : null,
+        source: 'gemini-vision',
+      });
+    } catch (err) {
+      console.warn('Okwin Gemini Vision polygon fallback to local edge-barrier:', err);
+      return res.json({ polygon: null, source: 'local' });
     }
   });
 

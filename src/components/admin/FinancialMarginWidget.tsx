@@ -227,14 +227,16 @@ export function FinancialMarginWidget({
             </div>
           </div>
 
-          {/* Red: Coût d'achat total */}
+          {/* Red: Coût d'achat total / Prix de revient du stock réel */}
           <div className="p-3.5 rounded-xl border border-red-200 bg-red-50/50 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
               <span className="w-3 h-10 rounded-full bg-red-600 shrink-0" />
               <div className="min-w-0">
-                <p className="text-xs font-bold text-red-950">Coût total aux prix d’achat</p>
+                <p className="text-xs font-bold text-red-950">
+                  Valeur du stock réel au prix d’achat (Prix de revient)
+                </p>
                 <p className="text-[11px] text-red-800">
-                  Capital immobilisé dans votre stock actuel
+                  Capital immobilisé dans votre stock réel (Quantité × Prix d’achat unitaire)
                 </p>
               </div>
             </div>

@@ -1211,22 +1211,56 @@ export function AdminStockImport({
           />
 
           {/* Accounting KPIs */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-white border border-slate-200 rounded-xl p-4">
-              <p className="text-xs text-slate-500">Valorisation Vente Stock (Compta)</p>
-              <p className="mt-1 font-mono font-bold text-lg text-blue-700 tabular-nums">
-                {formatDzd(comptaSummary.stockSaleDzd)}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+            <div className="bg-red-50/50 border border-red-200 rounded-xl p-4">
+              <p className="text-xs font-bold text-red-900">
+                Valeur Stock Réel (Prix d’Achat / Revient)
               </p>
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                Coût d’achat : {formatDzd(comptaSummary.stockCostDzd)}
+              <p className="mt-1 font-mono font-bold text-lg text-red-600 tabular-nums">
+                {formatDzd(
+                  liveFinancialItems.reduce(
+                    (acc, item) =>
+                      acc + Math.max(0, item.stockQuantity) * Math.max(0, item.costPriceDzd),
+                    0,
+                  ) || comptaSummary.stockCostDzd,
+                )}
+              </p>
+              <p className="text-[11px] text-red-800 mt-0.5">
+                Capital réel immobilisé au prix d’achat
               </p>
             </div>
-            <div className="bg-white border border-slate-200 rounded-xl p-4">
-              <p className="text-xs text-slate-500">Marge Bénéficiaire Stock</p>
-              <p className="mt-1 font-mono font-bold text-lg text-emerald-700 tabular-nums">
-                +{formatDzd(comptaSummary.stockMarginDzd)}
+            <div className="bg-blue-50/50 border border-blue-200 rounded-xl p-4">
+              <p className="text-xs font-bold text-blue-900">Valorisation Vente Stock</p>
+              <p className="mt-1 font-mono font-bold text-lg text-blue-700 tabular-nums">
+                {formatDzd(
+                  liveFinancialItems.reduce(
+                    (acc, item) =>
+                      acc + Math.max(0, item.stockQuantity) * Math.max(0, item.priceDzd),
+                    0,
+                  ) || comptaSummary.stockSaleDzd,
+                )}
               </p>
-              <p className="text-[11px] text-slate-400 mt-0.5">Bénéfice latent sur inventaire</p>
+              <p className="text-[11px] text-blue-800 mt-0.5">
+                {comptaSummary.stockSaleDzd > 0
+                  ? `Écritures compta : ${formatDzd(comptaSummary.stockSaleDzd)}`
+                  : 'Valeur totale aux prix de vente'}
+              </p>
+            </div>
+            <div className="bg-emerald-50/50 border border-emerald-200 rounded-xl p-4">
+              <p className="text-xs font-bold text-emerald-900">Marge Bénéficiaire Stock</p>
+              <p className="mt-1 font-mono font-bold text-lg text-emerald-700 tabular-nums">
+                +
+                {formatDzd(
+                  liveFinancialItems.reduce(
+                    (acc, item) =>
+                      acc +
+                      Math.max(0, item.stockQuantity) *
+                        (Math.max(0, item.priceDzd) - Math.max(0, item.costPriceDzd)),
+                    0,
+                  ) || comptaSummary.stockMarginDzd,
+                )}
+              </p>
+              <p className="text-[11px] text-emerald-800 mt-0.5">Bénéfice latent sur stock réel</p>
             </div>
             <div className="bg-white border border-slate-200 rounded-xl p-4">
               <p className="text-xs text-slate-500">Ventes &amp; Recettes Comptabilisées</p>

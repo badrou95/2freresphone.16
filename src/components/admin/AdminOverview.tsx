@@ -188,14 +188,18 @@ export function AdminOverview({
 
         <div className="bg-white border border-slate-200 rounded-xl p-5">
           <div className="flex items-center justify-between text-xs text-slate-500">
-            <span>Catalogue &amp; Valeur stock</span>
+            <span>Stock Réel (Vente &amp; Prix de revient)</span>
             <Package className="w-4 h-4 text-slate-700" />
           </div>
-          <p className="mt-2 font-mono font-bold text-2xl text-slate-900 tabular-nums">
+          <p className="mt-2 font-mono font-bold text-2xl text-blue-700 tabular-nums" title="Valorisation du stock réel au prix de vente">
             {formatDzd(kpis.stockValuationDzd)}
           </p>
-          <p className="mt-1 text-xs text-slate-500 tabular-nums">
-            {kpis.totalProducts} produits · {kpis.totalCustomers} clients
+          <p className="mt-1 text-xs font-semibold text-red-600 tabular-nums">
+            Prix d’achat (revient) :{' '}
+            <span className="font-mono">{formatDzd(kpis.stockCostValuationDzd ?? 0)}</span>
+          </p>
+          <p className="mt-0.5 text-[11px] text-slate-500 tabular-nums">
+            Marge stock : <span className="font-mono text-emerald-700 font-semibold">+{formatDzd(kpis.stockLatentMarginDzd ?? (kpis.stockValuationDzd - (kpis.stockCostValuationDzd ?? 0)))}</span> · {kpis.totalProducts} produits
           </p>
         </div>
       </div>

@@ -18,6 +18,7 @@ import {
   Sparkles,
   Truck,
   Zap,
+  ZoomIn,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { ALGERIA_WILAYAS } from '../../shared/algeria';
@@ -34,6 +35,7 @@ import {
   StoreProduct,
   StoreSettings,
 } from '../../types';
+import { ImageZoomLightbox } from '../ImageZoomLightbox';
 import { ProductImage } from '../ProductImage';
 import { StarInput, StarRating } from '../StarRating';
 
@@ -65,6 +67,7 @@ export function ProductDetailView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeImageIdx, setActiveImageIdx] = useState(0);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
   const [quantity, setQuantity] = useState(1);
   const [selectedBundle, setSelectedBundle] = useState<1 | 2 | 3>(1);
   const [selectedColor, setSelectedColor] = useState<string>('');
@@ -458,12 +461,35 @@ export function ProductDetailView({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
           {/* Left: Sticky Photo Gallery */}
           <div className="lg:col-span-6 lg:sticky lg:top-24 space-y-3">
-            <div className="aspect-[4/3] bg-white border border-slate-200 rounded-xl overflow-hidden relative">
-              <ProductImage src={mainImageUrl} alt={product.name} />
+            <div className="aspect-[4/3] bg-white border border-slate-200 rounded-xl overflow-hidden relative group">
+              <button
+                type="button"
+                onClick={() => mainImageUrl && setLightboxOpen(true)}
+                disabled={!mainImageUrl}
+                aria-label={`Agrandir la photo de ${product.name}`}
+                className="w-full h-full block cursor-zoom-in focus:outline-none"
+              >
+                <ProductImage
+                  src={mainImageUrl}
+                  alt={product.name}
+                  className="w-full h-full object-contain bg-white transition-transform duration-300 group-hover:scale-[1.02]"
+                />
+              </button>
               {bundlePricing.discountPct > 0 && (
-                <span className="absolute top-3 left-3 px-3 py-1 rounded-md bg-red-600 text-white text-xs font-bold shadow-sm">
+                <span className="absolute top-3 left-3 px-3 py-1 rounded-md bg-red-600 text-white text-xs font-bold shadow-sm pointer-events-none">
                   OFFRE PACK -{bundlePricing.discountPct}%
                 </span>
+              )}
+              {mainImageUrl && (
+                <button
+                  type="button"
+                  onClick={() => setLightboxOpen(true)}
+                  aria-label="Cliquer pour agrandir l'image"
+                  className="absolute bottom-3 right-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900/80 hover:bg-blue-700 text-white text-xs font-semibold backdrop-blur-xs shadow-md transition-colors"
+                >
+                  <ZoomIn className="w-3.5 h-3.5" />
+                  <span>Cliquer pour agrandir</span>
+                </button>
               )}
             </div>
             {gallery.length > 1 && (
@@ -474,11 +500,15 @@ export function ProductDetailView({
                     type="button"
                     onClick={() => setActiveImageIdx(idx)}
                     aria-label={`Afficher photo ${idx + 1}`}
-                    className={`aspect-square rounded-lg overflow-hidden border-2 transition-colors ${
+                    className={`aspect-square rounded-lg overflow-hidden border-2 bg-white transition-colors ${
                       idx === activeImageIdx ? 'border-blue-700' : 'border-slate-200 hover:border-slate-400'
                     }`}
                   >
-                    <ProductImage src={img.url} alt={img.altText || product.name} />
+                    <ProductImage
+                      src={img.url}
+                      alt={img.altText || product.name}
+                      className="w-full h-full object-contain"
+                    />
                   </button>
                 ))}
               </div>
@@ -1327,6 +1357,25 @@ export function ProductDetailView({
             </div>
           </div>
         </div>
+      )}
+      {lightboxOpen && mainImageUrl && (
+        <ImageZoomLightbox
+          images={
+            gallery.length > 0
+              ? gallery.map((g) => ({ url: g.url, alt: g.altText || product.name }))
+              : [{ url: mainImageUrl, alt: product.name }]
+          }
+          initialIndex={
+            gallery.length > 0
+              ? Math.max(
+                  0,
+                  gallery.findIndex((g) => g.url === mainImageUrl),
+                )
+              : 0
+          }
+          title={product.name}
+          onClose={() => setLightboxOpen(false)}
+        />
       )}
     </div>
   );

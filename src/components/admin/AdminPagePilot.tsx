@@ -9,6 +9,7 @@ import {
   Pencil,
   Plus,
   Sparkles,
+  Star,
   Trash2,
   Upload,
   Wand2,
@@ -661,19 +662,34 @@ export function AdminPagePilot({
               {quickPhotos.map((url, idx) => (
                 <div
                   key={`${url}-${idx}`}
-                  className="relative w-32 h-32 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 group"
+                  className={`relative w-32 h-32 rounded-xl overflow-hidden border bg-slate-100 group ${
+                    idx === 0 ? 'border-blue-600 ring-2 ring-blue-500/20' : 'border-slate-200'
+                  }`}
                 >
                   <ProductImage src={url} alt={`Photo produit ${idx + 1}`} />
-                  {idx === 0 && (
-                    <span className="absolute bottom-1.5 left-1.5 px-2 py-0.5 rounded bg-blue-700 text-white text-[10px] font-bold">
-                      Principale
+                  {idx === 0 ? (
+                    <span className="absolute bottom-1.5 left-1.5 px-2 py-0.5 rounded bg-blue-700 text-white text-[10px] font-bold inline-flex items-center gap-1">
+                      <Check className="w-2.5 h-2.5" />
+                      <span>Principale</span>
                     </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setQuickPhotos((prev) => [url, ...prev.filter((_, i) => i !== idx)])
+                      }
+                      className="absolute bottom-1.5 left-1.5 px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-bold inline-flex items-center gap-1 shadow-xs"
+                      title="Choisir cette photo comme Photo Principale"
+                    >
+                      <Star className="w-2.5 h-2.5 fill-slate-950" />
+                      <span>Choisir Principale</span>
+                    </button>
                   )}
                   <button
                     type="button"
                     onClick={() => setQuickPhotos((prev) => prev.filter((_, i) => i !== idx))}
                     className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-slate-900/80 text-white flex items-center justify-center hover:bg-red-600"
-                    title="Retirer cette photo"
+                    title="Supprimer cette photo"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -768,6 +784,9 @@ export function AdminPagePilot({
             onSourceImageUploaded={(url) => setQuickPhotos((prev) => [url, ...prev])}
             onAddGeneratedImages={(urls) =>
               setQuickPhotos((prev) => Array.from(new Set([...prev, ...urls])))
+            }
+            onSetPrimaryImage={(url) =>
+              setQuickPhotos((prev) => [url, ...prev.filter((u) => u !== url)])
             }
           />
         )}
@@ -1010,17 +1029,80 @@ export function AdminPagePilot({
 
                 {Array.isArray(form.galleryImages) && form.galleryImages.length > 0 && (
                   <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                    {form.galleryImages.map((imgUrl: string, idx: number) => (
-                      <div
-                        key={`${imgUrl}-${idx}`}
-                        onClick={() => setForm({ ...form, heroImageUrl: imgUrl })}
-                        className={`relative w-12 h-12 rounded-lg overflow-hidden border-2 cursor-pointer shrink-0 ${
-                          form.heroImageUrl === imgUrl ? 'border-blue-600' : 'border-slate-200'
-                        }`}
-                      >
-                        <ProductImage src={imgUrl} alt={`Galerie ${idx + 1}`} />
-                      </div>
-                    ))}
+                    {form.galleryImages.map((imgUrl: string, idx: number) => {
+                      const isPrimary = form.heroImageUrl === imgUrl;
+                      return (
+                        <div
+                          key={`${imgUrl}-${idx}`}
+                          className={`relative w-16 h-16 rounded-xl overflow-hidden border-2 shrink-0 bg-white ${
+                            isPrimary ? 'border-blue-600 ring-2 ring-blue-500/20' : 'border-slate-200'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setForm((prev: any) => ({
+                                ...prev,
+                                heroImageUrl: imgUrl,
+                                galleryImages: [
+                                  imgUrl,
+                                  ...(prev.galleryImages || []).filter((u: string) => u !== imgUrl),
+                                ],
+                              }))
+                            }
+                            className="w-full h-full block"
+                            title="Cliquer pour définir comme Photo Principale"
+                          >
+                            <ProductImage src={imgUrl} alt={`Galerie ${idx + 1}`} />
+                          </button>
+                          {isPrimary ? (
+                            <span className="absolute bottom-0 inset-x-0 bg-blue-700/90 text-white text-[9px] font-bold text-center py-0.5">
+                              Principale
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setForm((prev: any) => ({
+                                  ...prev,
+                                  heroImageUrl: imgUrl,
+                                  galleryImages: [
+                                    imgUrl,
+                                    ...(prev.galleryImages || []).filter((u: string) => u !== imgUrl),
+                                  ],
+                                }))
+                              }
+                              className="absolute bottom-0 inset-x-0 bg-amber-500/95 hover:bg-amber-400 text-slate-950 text-[8px] font-bold text-center py-0.5"
+                              title="Choisir comme Principale"
+                            >
+                              ★ Principale
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setForm((prev: any) => {
+                                const nextGallery = (prev.galleryImages || []).filter(
+                                  (_: string, i: number) => i !== idx,
+                                );
+                                return {
+                                  ...prev,
+                                  galleryImages: nextGallery,
+                                  heroImageUrl:
+                                    prev.heroImageUrl === imgUrl
+                                      ? nextGallery[0] || ''
+                                      : prev.heroImageUrl,
+                                };
+                              })
+                            }
+                            className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-red-600/90 hover:bg-red-700 text-white flex items-center justify-center"
+                            title="Supprimer cette photo"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
@@ -1074,6 +1156,16 @@ export function AdminPagePilot({
                     ...prev,
                     heroImageUrl: prev.heroImageUrl || urls[0] || '',
                     galleryImages: Array.from(new Set([...(prev.galleryImages || []), ...urls])),
+                  }))
+                }
+                onSetPrimaryImage={(url) =>
+                  setForm((prev: any) => ({
+                    ...prev,
+                    heroImageUrl: url,
+                    galleryImages: [
+                      url,
+                      ...(prev.galleryImages || []).filter((u: string) => u !== url),
+                    ],
                   }))
                 }
               />

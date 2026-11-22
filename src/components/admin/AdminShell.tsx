@@ -582,6 +582,7 @@ export function AdminShell({
             <AdminSales
               sales={sales}
               orders={orders}
+              products={products}
               accountingEntries={stockData?.accountingEntries || []}
               storeSettings={settingsData?.settings || publicSettings}
               onOpenMdfImport={() => handleNavigateTab('mdf_import')}

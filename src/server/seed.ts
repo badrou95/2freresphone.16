@@ -23,28 +23,31 @@ const IMG_AUDIO_POWER = '/src/assets/images/prod_earbuds_powerbank_1795096637141
 const IMG_HERO = '/src/assets/images/hero_2freres_tech_1795096637447.jpg';
 
 const INITIAL_CATEGORIES = [
-  // 1. Accessoires téléphoniques
+  // 1. Accessoires téléphoniques & Promotions
+  { name: 'Promotion', slug: 'promotion', categoryGroup: 'accessories', sortOrder: 0 },
   { name: 'Coques', slug: 'coques', categoryGroup: 'accessories', sortOrder: 1 },
   { name: 'Verres trempés et protections', slug: 'verres-trempes-et-protections', categoryGroup: 'accessories', sortOrder: 2 },
   { name: 'Chargeurs', slug: 'chargeurs', categoryGroup: 'accessories', sortOrder: 3 },
   { name: 'Câbles', slug: 'cables', categoryGroup: 'accessories', sortOrder: 4 },
-  { name: 'Écouteurs filaires', slug: 'ecouteurs-filaires', categoryGroup: 'accessories', sortOrder: 5 },
-  { name: 'Écouteurs Bluetooth', slug: 'ecouteurs-bluetooth', categoryGroup: 'accessories', sortOrder: 6 },
-  { name: 'Batteries externes', slug: 'batteries-externes', categoryGroup: 'accessories', sortOrder: 7 },
-  { name: 'Supports téléphoniques', slug: 'supports-telephoniques', categoryGroup: 'accessories', sortOrder: 8 },
-  { name: 'Accessoires divers', slug: 'accessoires-divers', categoryGroup: 'accessories', sortOrder: 9 },
+  { name: 'Kits oreillettes filaires', slug: 'kits-oreillettes-filaires', categoryGroup: 'accessories', sortOrder: 5 },
+  { name: 'Écouteurs filaires', slug: 'ecouteurs-filaires', categoryGroup: 'accessories', sortOrder: 6 },
+  { name: 'Écouteurs Bluetooth', slug: 'ecouteurs-bluetooth', categoryGroup: 'accessories', sortOrder: 7 },
+  { name: 'Batteries externes', slug: 'batteries-externes', categoryGroup: 'accessories', sortOrder: 8 },
+  { name: 'Supports de téléphone', slug: 'supports-de-telephone', categoryGroup: 'accessories', sortOrder: 9 },
+  { name: 'Supports téléphoniques', slug: 'supports-telephoniques', categoryGroup: 'accessories', sortOrder: 10 },
+  { name: 'Accessoires divers', slug: 'accessoires-divers', categoryGroup: 'accessories', sortOrder: 11 },
   // 2. Jeux vidéo
-  { name: 'Jeux Xbox', slug: 'jeux-xbox', categoryGroup: 'gaming', sortOrder: 10 },
-  { name: 'Jeux PlayStation', slug: 'jeux-playstation', categoryGroup: 'gaming', sortOrder: 11 },
-  { name: 'Comptes Xbox', slug: 'comptes-xbox', categoryGroup: 'gaming', sortOrder: 12 },
-  { name: 'Comptes PlayStation', slug: 'comptes-playstation', categoryGroup: 'gaming', sortOrder: 13 },
-  { name: 'Abonnements gaming', slug: 'abonnements-gaming', categoryGroup: 'gaming', sortOrder: 14 },
-  { name: 'Cartes cadeaux', slug: 'cartes-cadeaux', categoryGroup: 'gaming', sortOrder: 15 },
+  { name: 'Jeux Xbox', slug: 'jeux-xbox', categoryGroup: 'gaming', sortOrder: 12 },
+  { name: 'Jeux PlayStation', slug: 'jeux-playstation', categoryGroup: 'gaming', sortOrder: 13 },
+  { name: 'Comptes Xbox', slug: 'comptes-xbox', categoryGroup: 'gaming', sortOrder: 14 },
+  { name: 'Comptes PlayStation', slug: 'comptes-playstation', categoryGroup: 'gaming', sortOrder: 15 },
+  { name: 'Abonnements gaming', slug: 'abonnements-gaming', categoryGroup: 'gaming', sortOrder: 16 },
+  { name: 'Cartes cadeaux', slug: 'cartes-cadeaux', categoryGroup: 'gaming', sortOrder: 17 },
   // 3. Abonnements numériques
-  { name: 'Netflix', slug: 'netflix', categoryGroup: 'digital', sortOrder: 16 },
-  { name: 'Snapchat+', slug: 'snapchat-plus', categoryGroup: 'digital', sortOrder: 17 },
-  { name: 'Autres abonnements', slug: 'autres-abonnements', categoryGroup: 'digital', sortOrder: 18 },
-  { name: 'Services numériques', slug: 'services-numeriques', categoryGroup: 'digital', sortOrder: 19 },
+  { name: 'Netflix', slug: 'netflix', categoryGroup: 'digital', sortOrder: 18 },
+  { name: 'Snapchat+', slug: 'snapchat-plus', categoryGroup: 'digital', sortOrder: 19 },
+  { name: 'Autres abonnements', slug: 'autres-abonnements', categoryGroup: 'digital', sortOrder: 20 },
+  { name: 'Services numériques', slug: 'services-numeriques', categoryGroup: 'digital', sortOrder: 21 },
 ];
 
 const DDL_STATEMENTS: string[] = [

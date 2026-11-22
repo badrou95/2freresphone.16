@@ -11,6 +11,7 @@ import {
   Sparkles,
   Star,
   Truck,
+  ZoomIn,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { ALGERIA_WILAYAS } from '../../shared/algeria';
@@ -20,6 +21,7 @@ import {
   isValidAlgerianPhone,
 } from '../../shared/domain';
 import { ProductColorOption, StoreBootstrap } from '../../types';
+import { ImageZoomLightbox } from '../ImageZoomLightbox';
 import { ProductImage } from '../ProductImage';
 
 interface LandingPageViewProps {
@@ -55,6 +57,7 @@ export function LandingPageView({
   const [orderError, setOrderError] = useState<string | null>(null);
   const [createdOrder, setCreatedOrder] = useState<any | null>(null);
   const [selectedImage, setSelectedImage] = useState<string>('');
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   const availableColors: ProductColorOption[] = useMemo(() => {
     if (!page || !Array.isArray(page.colors)) return [];
@@ -327,15 +330,37 @@ export function LandingPageView({
             </div>
 
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
-              <div className="aspect-[4/3] w-full bg-slate-100 relative">
-                <ProductImage src={activeImage || page.heroImageUrl} alt={page.productName} />
+              <div className="aspect-[4/3] w-full bg-white relative group">
+                <button
+                  type="button"
+                  onClick={() => (activeImage || page.heroImageUrl) && setLightboxOpen(true)}
+                  aria-label={`Agrandir la photo de ${page.productName}`}
+                  className="w-full h-full block cursor-zoom-in focus:outline-none"
+                >
+                  <ProductImage
+                    src={activeImage || page.heroImageUrl}
+                    alt={page.productName}
+                    className="w-full h-full object-contain bg-white transition-transform duration-300 group-hover:scale-[1.02]"
+                  />
+                </button>
                 {discountPercent && (
-                  <span className="absolute top-4 left-4 px-3 py-1 rounded-lg bg-red-600 text-white font-mono text-xs font-bold shadow">
+                  <span className="absolute top-4 left-4 px-3 py-1 rounded-lg bg-red-600 text-white font-mono text-xs font-bold shadow pointer-events-none">
                     -{discountPercent}% PROMO
                   </span>
                 )}
+                {(activeImage || page.heroImageUrl) && (
+                  <button
+                    type="button"
+                    onClick={() => setLightboxOpen(true)}
+                    aria-label="Cliquer pour agrandir l'image"
+                    className="absolute bottom-3 left-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900/80 hover:bg-blue-700 text-white text-xs font-semibold backdrop-blur-xs shadow-md transition-colors"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                    <span>Agrandir l’image</span>
+                  </button>
+                )}
                 {galleryList.length > 1 && (
-                  <span className="absolute bottom-3 right-3 px-2.5 py-1 rounded-lg bg-slate-900/80 text-white text-[11px] font-semibold backdrop-blur-sm">
+                  <span className="absolute bottom-3 right-3 px-2.5 py-1 rounded-lg bg-slate-900/80 text-white text-[11px] font-semibold backdrop-blur-sm pointer-events-none">
                     {galleryList.indexOf(activeImage) + 1 || 1} / {galleryList.length} photos
                   </span>
                 )}
@@ -811,6 +836,25 @@ export function LandingPageView({
           </div>
         )}
       </div>
+      {lightboxOpen && (activeImage || page.heroImageUrl) && (
+        <ImageZoomLightbox
+          images={
+            galleryList.length > 0
+              ? galleryList.map((u: string, i: number) => ({
+                  url: u,
+                  alt: `${page.productName} ${i + 1}`,
+                }))
+              : [{ url: activeImage || page.heroImageUrl, alt: page.productName }]
+          }
+          initialIndex={
+            galleryList.length > 0
+              ? Math.max(0, galleryList.indexOf(activeImage || page.heroImageUrl))
+              : 0
+          }
+          title={page.productName}
+          onClose={() => setLightboxOpen(false)}
+        />
+      )}
     </div>
   );
 }
