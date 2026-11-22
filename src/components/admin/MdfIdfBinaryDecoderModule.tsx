@@ -24,36 +24,50 @@ interface MdfIdfBinaryDecoderModuleProps {
   compact?: boolean;
 }
 
+function uint8ToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const sub = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
+    let str = '';
+    for (let j = 0; j < sub.length; j++) {
+      str += String.fromCharCode(sub[j]);
+    }
+    parts.push(str);
+  }
+  return btoa(parts.join(''));
+}
+
 /**
  * Lossless 8192-byte SQL Server Data Page Extractor for browser uploads:
  * - NEVER strips zero bytes inside 8192-byte SQL Server pages (which would destroy
  *   page alignment, null bitmaps, var-offset arrays, and 8-byte FLOAT64/DECIMAL prices).
- * - Trims .LDF transaction log files > 64 KB down to 16 KB (only header needed).
- * - For .MDF / .NDF files > 3.5 MB, copies complete 8192-byte SQL Server data & catalog pages
- *   verbatim while skipping empty allocation pages and sys.sysobjvalues (m_objId = 60).
+ * - Trims .LDF transaction log files > 16 KB down to 16 KB (only header needed).
+ * - For any .MDF / .NDF / .IDF file > 128 KB, copies complete 8192-byte SQL Server Leaf Data
+ *   & System Catalog pages (headerVer=1, pageType=1, pageLevel=0, slotCnt 1..700) verbatim
+ *   while skipping empty disk allocation pages and sys.sysobjvalues (m_objId = 60).
  */
 export async function compactDatabaseFileForUpload(file: File): Promise<File> {
-  // 1. Transaction log files (.ldf) only carry transaction rollbacks; keep 16 KB header
-  if (/\.ldf$/i.test(file.name) && file.size > 64 * 1024) {
+  // 1. Transaction log files (.ldf) only carry WAL transaction rollbacks; keep 16 KB header
+  if (/\.ldf$/i.test(file.name) && file.size > 16 * 1024) {
     return new File([file.slice(0, 16 * 1024)], file.name, {
       type: file.type || 'application/octet-stream',
       lastModified: file.lastModified,
     });
   }
 
-  // 2. For any file <= 3.5 MB, upload 100% untouched so every 8192-byte page stays bit-exact
-  if (file.size <= 3.5 * 1024 * 1024) {
+  // 2. Small files <= 128 KB need no page filtering
+  if (file.size <= 128 * 1024) {
     return file;
   }
 
-  // 3. For larger .MDF / .NDF / .IDF files (> 3.5 MB), extract complete 8192-byte SQL Server pages verbatim
-  const isMdfOrIdf = /\.(mdf|ndf|idf|bak|dat)$/i.test(file.name);
-  if (!isMdfOrIdf) {
+  const isBinaryDbFile = /\.(mdf|ndf|idf|bak|dat)$/i.test(file.name);
+  if (!isBinaryDbFile) {
     return file;
   }
 
   try {
-    const sliceLimit = Math.min(file.size, 80 * 1024 * 1024);
+    const sliceLimit = Math.min(file.size, 120 * 1024 * 1024);
     const ab = await file.slice(0, sliceLimit).arrayBuffer();
     const src = new Uint8Array(ab);
     const view = new DataView(ab);
@@ -63,57 +77,40 @@ export async function compactDatabaseFileForUpload(file: File): Promise<File> {
       return file;
     }
 
-    // Detect if file consists of 8192-byte SQL Server pages
-    const keptPages: Uint8Array[] = [];
-    let keptBytes = 0;
-    const maxBytes = 3.8 * 1024 * 1024;
+    // Match the exact SQL Server 8KB Leaf Data Page condition used by parseSqlServer8KbDataPages
+    const catalogPages: Uint8Array[] = [];
+    const userDataPages: Uint8Array[] = [];
     let validSqlPages = 0;
 
-    for (let off = 0; off + PAGE_SIZE <= src.length && keptBytes + PAGE_SIZE <= maxBytes; off += PAGE_SIZE) {
-      const mHeaderVersion = src[off];
-      const mType = src[off + 1];
-      const mFlagBits = view.getUint16(off + 4, true);
-      const mSlotCnt = view.getUint16(off + 22, true);
-      const mObjId = view.getUint32(off + 24, true);
-      const mFreeCnt = view.getUint16(off + 28, true);
-      const mFreeData = view.getUint16(off + 30, true);
+    for (let off = 0; off + PAGE_SIZE <= src.length; off += PAGE_SIZE) {
+      const headerVer = src[off];
+      const pageType = src[off + 1];
+      const pageLevel = src[off + 3];
+      if (headerVer !== 0x01 || pageType !== 0x01 || pageLevel !== 0x00) continue;
 
-      if (
-        mHeaderVersion === 1 &&
-        mType === 1 &&
-        (mFlagBits & 0x0004) !== 0 &&
-        mSlotCnt >= 1 &&
-        mSlotCnt <= 1000 &&
-        mFreeData >= 96 &&
-        mFreeData <= PAGE_SIZE &&
-        mFreeCnt < PAGE_SIZE
-      ) {
-        validSqlPages++;
-        // Skip sys.sysobjvalues (60) which stores internal SQL view definitions ("FROM dbo.Customer...")
-        if (mObjId === 60) continue;
-        // Keep system schema catalog pages (3, 5, 7, 29, 34, 41, 54, 55) and all user table pages (>= 100 or 0)
-        const isCatalogPage =
-          mObjId === 3 ||
-          mObjId === 5 ||
-          mObjId === 7 ||
-          mObjId === 29 ||
-          mObjId === 34 ||
-          mObjId === 41 ||
-          mObjId === 54 ||
-          mObjId === 55;
-        if (isCatalogPage || mObjId >= 100 || mObjId === 0) {
-          keptPages.push(src.subarray(off, off + PAGE_SIZE));
-          keptBytes += PAGE_SIZE;
-        }
+      const slotCnt = view.getUint16(off + 22, true);
+      if (slotCnt < 1 || slotCnt > 700) continue;
+
+      const mObjId = view.getUint32(off + 24, true);
+      validSqlPages++;
+
+      // Skip sys.sysobjvalues (60) which stores internal SQL view definitions ("FROM dbo.Customer...")
+      if (mObjId === 60) continue;
+
+      const pageSlice = src.subarray(off, off + PAGE_SIZE);
+      if (mObjId > 0 && mObjId < 100) {
+        catalogPages.push(pageSlice);
+      } else {
+        userDataPages.push(pageSlice);
       }
     }
 
-    if (validSqlPages >= 2 && keptPages.length > 0) {
-      const out = new Uint8Array(keptBytes);
-      let cursor = 0;
-      for (const page of keptPages) {
-        out.set(page, cursor);
-        cursor += PAGE_SIZE;
+    const combinedSqlPages = [...catalogPages, ...userDataPages];
+    if (validSqlPages >= 2 && combinedSqlPages.length > 0) {
+      const maxPages = Math.min(combinedSqlPages.length, 750); // up to ~6 MB of active 8KB data pages
+      const out = new Uint8Array(maxPages * PAGE_SIZE);
+      for (let i = 0; i < maxPages; i++) {
+        out.set(combinedSqlPages[i], i * PAGE_SIZE);
       }
       return new File([out], file.name, {
         type: file.type || 'application/octet-stream',
@@ -121,9 +118,88 @@ export async function compactDatabaseFileForUpload(file: File): Promise<File> {
       });
     }
 
+    // Fallback for non-SQL-Server .IDF / .BAK files > 1.5 MB: strip 100% zero-filled 8KB blocks
+    if (src.length > 1.5 * 1024 * 1024) {
+      const nonZeroBlocks: Uint8Array[] = [];
+      const maxBlocks = 450; // ~3.6 MB max
+      for (let off = 0; off + PAGE_SIZE <= src.length && nonZeroBlocks.length < maxBlocks; off += PAGE_SIZE) {
+        let hasNonZero = false;
+        for (let k = off; k < off + PAGE_SIZE; k += 16) {
+          if (src[k] !== 0 || src[k + 1] !== 0 || src[k + 4] !== 0 || src[k + 8] !== 0) {
+            hasNonZero = true;
+            break;
+          }
+        }
+        if (hasNonZero) {
+          nonZeroBlocks.push(src.subarray(off, off + PAGE_SIZE));
+        }
+      }
+      if (nonZeroBlocks.length > 0 && nonZeroBlocks.length * PAGE_SIZE < src.length) {
+        const out = new Uint8Array(nonZeroBlocks.length * PAGE_SIZE);
+        for (let i = 0; i < nonZeroBlocks.length; i++) {
+          out.set(nonZeroBlocks[i], i * PAGE_SIZE);
+        }
+        return new File([out], file.name, {
+          type: file.type || 'application/octet-stream',
+          lastModified: file.lastModified,
+        });
+      }
+    }
+
     return file;
   } catch {
     return file;
+  }
+}
+
+/**
+ * Uploads one or more database files (.MDF, .IDF, .LDF, Excel, CSV, etc.) in 384 KB binary chunks
+ * (512 KB base64 JSON per request) so it NEVER triggers HTTP 413 Payload Too Large on Vercel or proxies.
+ */
+export async function uploadDatabaseFilesInChunks(
+  files: File[],
+  onProgress?: (msg: string) => void,
+): Promise<void> {
+  const compactedFiles = await Promise.all(files.map((f) => compactDatabaseFileForUpload(f)));
+  // 48 * 8192 = 393,216 bytes (divisible by 3 for zero base64 intermediate padding, and divisible by 8192)
+  const CHUNK_BYTE_SIZE = 48 * 8192;
+
+  for (let fileIdx = 0; fileIdx < compactedFiles.length; fileIdx++) {
+    const file = compactedFiles[fileIdx];
+    const ab = await file.arrayBuffer();
+    const bytes = new Uint8Array(ab);
+    const totalChunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTE_SIZE));
+    let assetId: number | null = null;
+
+    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+      if (onProgress) {
+        onProgress(
+          `Transfert sécurisé ${file.name} (${chunkIndex + 1}/${totalChunks} · ${Math.round(
+            bytes.length / 1024,
+          )} Ko de pages actives)...`,
+        );
+      }
+      const start = chunkIndex * CHUNK_BYTE_SIZE;
+      const end = Math.min(start + CHUNK_BYTE_SIZE, bytes.length);
+      const slice = bytes.subarray(start, end);
+      const dataBase64 = uint8ToBase64(slice);
+
+      const res: { ok: boolean; assetId: number } = await adminFetch<{ ok: boolean; assetId: number }>(
+        '/api/admin/stock/import/upload-chunk',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            fileName: file.name,
+            chunkIndex,
+            totalChunks,
+            dataBase64,
+            resetPrevious: fileIdx === 0 && chunkIndex === 0,
+            assetId,
+          }),
+        },
+      );
+      assetId = res.assetId;
+    }
   }
 }
 
@@ -154,6 +230,7 @@ export function MdfIdfBinaryDecoderModule({
   const [commitResult, setCommitResult] = useState<any | null>(null);
   const [hasSavedBackupOnServer, setHasSavedBackupOnServer] = useState<boolean>(false);
   const [savedBackupFileName, setSavedBackupFileName] = useState<string>('');
+  const [uploadedSignature, setUploadedSignature] = useState<string>('');
 
   useEffect(() => {
     adminFetch<any>('/api/admin/stock/import/backup-status')
@@ -172,6 +249,9 @@ export function MdfIdfBinaryDecoderModule({
     ...extraFiles,
   ];
 
+  const getFilesSignature = (files: File[]) =>
+    files.map((f) => `${f.name}:${f.size}:${f.lastModified}`).join('|');
+
   const runBinaryDecodePreview = async (
     filesToAnalyze: File[],
     shouldAutoCommit = false,
@@ -184,24 +264,24 @@ export function MdfIdfBinaryDecoderModule({
     setStatusBanner(null);
     setCommitResult(null);
     try {
-      const compactedFiles = await Promise.all(
-        filesToAnalyze.map((f) => compactDatabaseFileForUpload(f)),
-      );
-      const fd = new FormData();
-      for (const f of compactedFiles) {
-        fd.append('files', f);
+      const sig = getFilesSignature(filesToAnalyze);
+      if (sig !== uploadedSignature) {
+        await uploadDatabaseFilesInChunks(filesToAnalyze, (msg) => setStatusBanner(msg));
+        setUploadedSignature(sig);
       }
-      fd.append('syncMode', syncMode);
-      if (preferredTable) {
-        fd.append('tableName', preferredTable);
-      }
-      if (mappingOverride && mappingOverride.name) {
-        fd.append('mappingJson', JSON.stringify(mappingOverride));
-      }
+
+      setStatusBanner('Décodage binaire des pages SQL Server 8 Ko en cours...');
       const res = await adminFetch<any>('/api/admin/stock/import/preview', {
         method: 'POST',
-        body: fd,
+        body: JSON.stringify({
+          useStoredBackup: true,
+          syncMode,
+          tableName: preferredTable || undefined,
+          mappingJson:
+            mappingOverride && mappingOverride.name ? JSON.stringify(mappingOverride) : undefined,
+        }),
       });
+      setStatusBanner(null);
       setPreview(res);
       setSelectedTableName(res.selectedTable || '');
       const serverMapping = res.mapping || res.inferredMapping || { name: '' };
@@ -210,9 +290,10 @@ export function MdfIdfBinaryDecoderModule({
       setSavedBackupFileName(res.fileName || filesToAnalyze[0]?.name || 'nabils.mdf');
 
       if (shouldAutoCommit || autoIntegrateOnSelect) {
-        await executeCommit(filesToAnalyze, res, serverMapping);
+        await executeCommit(filesToAnalyze, res, serverMapping, sig);
       }
     } catch (err: any) {
+      setStatusBanner(null);
       setErrorMsg(err?.message || 'Erreur lors du décodage binaire des fichiers .MDF / .IDF.');
     } finally {
       setParsing(false);
@@ -223,6 +304,7 @@ export function MdfIdfBinaryDecoderModule({
     filesToCommit?: File[],
     previewOverride?: any,
     mappingOverride?: Record<string, string>,
+    knownSignature?: string,
   ) => {
     const targetFiles = filesToCommit && filesToCommit.length > 0 ? filesToCommit : allFiles;
     if (targetFiles.length === 0) {
@@ -237,21 +319,15 @@ export function MdfIdfBinaryDecoderModule({
     setErrorMsg(null);
     setStatusBanner(null);
     try {
-      const compactedFiles = await Promise.all(
-        targetFiles.map((f) => compactDatabaseFileForUpload(f)),
-      );
-      const fd = new FormData();
-      for (const f of compactedFiles) {
-        fd.append('files', f);
+      const sig = getFilesSignature(targetFiles);
+      if (sig !== (knownSignature || uploadedSignature)) {
+        await uploadDatabaseFilesInChunks(targetFiles, (msg) => setStatusBanner(msg));
+        setUploadedSignature(sig);
       }
+
+      setStatusBanner('Génération du Stock et de la Comptabilité dans PostgreSQL...');
       const activePreview = previewOverride || preview;
       const tableToUse = selectedTableName || activePreview?.selectedTable;
-      if (tableToUse) {
-        fd.append('tableName', tableToUse);
-      }
-      fd.append('syncMode', syncMode);
-      fd.append('generateAccounting', generateAccounting ? 'true' : 'false');
-      fd.append('cleanPreviousImports', cleanPreviousImports ? 'true' : 'false');
 
       const activeMap =
         mappingOverride && mappingOverride.name
@@ -260,21 +336,24 @@ export function MdfIdfBinaryDecoderModule({
           ? customMapping
           : activePreview?.mapping || activePreview?.inferredMapping;
 
-      if (activeMap && activeMap.name) {
-        fd.append('mappingJson', JSON.stringify(activeMap));
-      }
-      if (defaultCategoryId) {
-        fd.append('defaultCategoryId', defaultCategoryId);
-      }
-
       const res = await adminFetch<any>('/api/admin/stock/import/commit', {
         method: 'POST',
-        body: fd,
+        body: JSON.stringify({
+          useStoredBackup: true,
+          tableName: tableToUse || undefined,
+          syncMode,
+          generateAccounting,
+          cleanPreviousImports,
+          mappingJson: activeMap && activeMap.name ? JSON.stringify(activeMap) : undefined,
+          defaultCategoryId: defaultCategoryId || undefined,
+        }),
       });
+      setStatusBanner(null);
       setCommitResult(res);
       setHasSavedBackupOnServer(true);
       onRefresh();
     } catch (err: any) {
+      setStatusBanner(null);
       setErrorMsg(err?.message || 'Erreur lors de la sauvegarde et de l’intégration dans la base de données.');
     } finally {
       setCommitting(false);

@@ -67,8 +67,8 @@ const upload = multer({
 
 export function createApp() {
   const app = express();
-  app.use(express.json({ limit: '15mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
   // Lazy seed middleware on API routes (never top-level startup probe!)
   app.use('/api', async (_req, res, next) => {
@@ -2292,6 +2292,65 @@ export function createApp() {
     }
   });
 
+  // Chunked upload endpoint for large .MDF / .IDF files (prevents HTTP 413 on Vercel & reverse proxies)
+  app.post('/api/admin/stock/import/upload-chunk', requireAdmin, async (req, res) => {
+    try {
+      const { fileName, chunkIndex, totalChunks, dataBase64, resetPrevious, assetId } = req.body || {};
+      if (!fileName || typeof dataBase64 !== 'string') {
+        return res.status(400).json({ error: 'Paramètres de fragment (chunk) manquants.' });
+      }
+      const idx = Number(chunkIndex) || 0;
+      const total = Number(totalChunks) || 1;
+      const chunkByteLen = Math.round((dataBase64.length * 3) / 4);
+
+      if (idx === 0 && resetPrevious) {
+        await db.delete(mediaAssets).where(eq(mediaAssets.kind, 'mdf_backup'));
+      }
+
+      if (idx === 0) {
+        const [inserted] = await db
+          .insert(mediaAssets)
+          .values({
+            filename: String(fileName),
+            mimeType: 'application/octet-stream',
+            dataBase64,
+            sizeBytes: chunkByteLen,
+            kind: 'mdf_backup',
+          })
+          .returning({ id: mediaAssets.id });
+        return res.json({
+          ok: true,
+          assetId: inserted.id,
+          chunkIndex: idx,
+          totalChunks: total,
+        });
+      }
+
+      const targetId = Number(assetId);
+      if (!targetId) {
+        return res.status(400).json({ error: 'assetId manquant pour la suite du fichier.' });
+      }
+
+      await db
+        .update(mediaAssets)
+        .set({
+          dataBase64: sql`${mediaAssets.dataBase64} || ${dataBase64}`,
+          sizeBytes: sql`${mediaAssets.sizeBytes} + ${chunkByteLen}`,
+        })
+        .where(eq(mediaAssets.id, targetId));
+
+      return res.json({
+        ok: true,
+        assetId: targetId,
+        chunkIndex: idx,
+        totalChunks: total,
+      });
+    } catch (error: any) {
+      console.error('Upload chunk error:', error);
+      return res.status(500).json({ error: error?.message || 'Erreur lors du transfert par fragments.' });
+    }
+  });
+
   // Preview universal stock & accounting database files (.MDF + .IDF, DBF, BAK, Excel, CSV, TSV, JSON, XML, SQLite, SQL)
   app.post('/api/admin/stock/import/preview', requireAdmin, upload.any(), async (req, res) => {
     try {
@@ -2301,20 +2360,39 @@ export function createApp() {
         : req.file
         ? [req.file]
         : [];
-      if (uploadedFiles.length === 0) {
-        return res.status(400).json({ error: 'Veuillez sélectionner votre fichier (ou vos deux fichiers .mdf et .idf).' });
+
+      let filesToParse: { buffer: Buffer; originalname: string }[] = [];
+
+      if (uploadedFiles.length > 0) {
+        await saveMdfBackupToMediaAssets(uploadedFiles);
+        filesToParse = uploadedFiles.map((f) => ({ buffer: f.buffer, originalname: f.originalname }));
+      } else {
+        const savedBackups = await db
+          .select()
+          .from(mediaAssets)
+          .where(eq(mediaAssets.kind, 'mdf_backup'))
+          .orderBy(asc(mediaAssets.id));
+        if (savedBackups.length === 0) {
+          return res
+            .status(400)
+            .json({ error: 'Veuillez sélectionner votre fichier (ou vos deux fichiers .mdf et .idf).' });
+        }
+        filesToParse = savedBackups.map((b) => ({
+          buffer: Buffer.from(b.dataBase64, 'base64'),
+          originalname: b.filename || 'nabils.mdf',
+        }));
       }
-      await saveMdfBackupToMediaAssets(uploadedFiles);
 
-      const preferredTable = req.body.tableName ? String(req.body.tableName) : undefined;
-      const syncMode = (req.body.syncMode || 'full_sync') as StockSyncMode;
-      const rawMapStr = req.body.mappingJson || req.body.mapping;
-      const customMapping: ColumnMapping | null = rawMapStr ? JSON.parse(String(rawMapStr)) : null;
+      const preferredTable = req.body?.tableName ? String(req.body.tableName) : undefined;
+      const syncMode = (req.body?.syncMode || 'full_sync') as StockSyncMode;
+      const rawMapStr = req.body?.mappingJson || req.body?.mapping;
+      const customMapping: ColumnMapping | null = rawMapStr
+        ? typeof rawMapStr === 'string'
+          ? JSON.parse(rawMapStr)
+          : rawMapStr
+        : null;
 
-      const parsed = await parseStockDatabaseFiles(
-        uploadedFiles.map((f) => ({ buffer: f.buffer, originalname: f.originalname })),
-        preferredTable,
-      );
+      const parsed = await parseStockDatabaseFiles(filesToParse, preferredTable);
       const selectedTableObj =
         parsed.tables.find((t) => t.tableName === parsed.selectedTable) || parsed.tables[0];
       const activeMapping = customMapping?.name ? customMapping : parsed.suggestedMapping;
@@ -2334,7 +2412,7 @@ export function createApp() {
 
       const diff = buildDifferentialSyncPlan(selectedTableObj.rows, activeMapping, existing, syncMode);
 
-      const combinedFileName = uploadedFiles.map((f) => f.originalname).join(' + ');
+      const combinedFileName = filesToParse.map((f) => f.originalname).join(' + ');
       const accountingEntriesPreview = extractAccountingEntriesFromTables(
         parsed.tables,
         selectedTableObj.rows,
@@ -2722,22 +2800,41 @@ export function createApp() {
         : req.file
         ? [req.file]
         : [];
-      if (uploadedFiles.length === 0) {
-        return res.status(400).json({ error: 'Fichier(s) de sauvegarde manquant(s).' });
-      }
-      await saveMdfBackupToMediaAssets(uploadedFiles);
 
-      const preferredTable = req.body.tableName ? String(req.body.tableName) : undefined;
-      const syncMode = (req.body.syncMode || 'full_sync') as StockSyncMode;
-      const rawMapStr = req.body.mappingJson || req.body.mapping;
-      const mapping: ColumnMapping = rawMapStr ? JSON.parse(String(rawMapStr)) : { name: '' };
-      const defaultCategoryId = req.body.defaultCategoryId ? Number(req.body.defaultCategoryId) : null;
-      const saveProfileName = req.body.saveProfileName ? String(req.body.saveProfileName).trim() : '';
-      const generateAccounting = req.body.generateAccounting !== 'false';
-      const cleanPreviousImports = req.body.cleanPreviousImports !== 'false';
+      let filesToCommit: { buffer: Buffer; originalname: string }[] = [];
+      if (uploadedFiles.length > 0) {
+        await saveMdfBackupToMediaAssets(uploadedFiles);
+        filesToCommit = uploadedFiles.map((f) => ({ buffer: f.buffer, originalname: f.originalname }));
+      } else {
+        const savedBackups = await db
+          .select()
+          .from(mediaAssets)
+          .where(eq(mediaAssets.kind, 'mdf_backup'))
+          .orderBy(asc(mediaAssets.id));
+        if (savedBackups.length === 0) {
+          return res.status(400).json({ error: 'Fichier(s) de sauvegarde manquant(s).' });
+        }
+        filesToCommit = savedBackups.map((b) => ({
+          buffer: Buffer.from(b.dataBase64, 'base64'),
+          originalname: b.filename || 'nabils.mdf',
+        }));
+      }
+
+      const preferredTable = req.body?.tableName ? String(req.body.tableName) : undefined;
+      const syncMode = (req.body?.syncMode || 'full_sync') as StockSyncMode;
+      const rawMapStr = req.body?.mappingJson || req.body?.mapping;
+      const mapping: ColumnMapping = rawMapStr
+        ? typeof rawMapStr === 'string'
+          ? JSON.parse(rawMapStr)
+          : rawMapStr
+        : { name: '' };
+      const defaultCategoryId = req.body?.defaultCategoryId ? Number(req.body.defaultCategoryId) : null;
+      const saveProfileName = req.body?.saveProfileName ? String(req.body.saveProfileName).trim() : '';
+      const generateAccounting = req.body?.generateAccounting !== 'false' && req.body?.generateAccounting !== false;
+      const cleanPreviousImports = req.body?.cleanPreviousImports !== 'false' && req.body?.cleanPreviousImports !== false;
 
       const result = await executeDatabaseImportCommit({
-        files: uploadedFiles.map((f) => ({ buffer: f.buffer, originalname: f.originalname })),
+        files: filesToCommit,
         preferredTable,
         syncMode,
         mapping,

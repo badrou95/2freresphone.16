@@ -25,8 +25,8 @@ import { formatDzd, toCsv } from '../../shared/domain';
 import { StoreSettings } from '../../types';
 import { FinancialMarginWidget } from './FinancialMarginWidget';
 import {
-  compactDatabaseFileForUpload,
   MdfIdfBinaryDecoderModule,
+  uploadDatabaseFilesInChunks,
 } from './MdfIdfBinaryDecoderModule';
 
 interface AdminStockImportProps {
@@ -130,17 +130,17 @@ export function AdminStockImport({
     setImportError(null);
     setCommitResult(null);
     try {
-      const preparedFiles = await Promise.all(filesToAnalyze.map((f) => compactDatabaseFileForUpload(f)));
-      const fd = new FormData();
-      preparedFiles.forEach((f) => fd.append('files', f));
-      fd.append('syncMode', opts?.mode || syncMode);
-      if (opts?.tableName) fd.append('tableName', opts.tableName);
-      if (opts?.customMapping && opts.customMapping.name) {
-        fd.append('mappingJson', JSON.stringify(opts.customMapping));
-      }
+      await uploadDatabaseFilesInChunks(filesToAnalyze);
       const res = await adminFetch<any>('/api/admin/stock/import/preview', {
         method: 'POST',
-        body: fd,
+        body: JSON.stringify({
+          useStoredBackup: true,
+          syncMode: opts?.mode || syncMode,
+          ...(opts?.tableName ? { tableName: opts.tableName } : {}),
+          ...(opts?.customMapping && opts.customMapping.name
+            ? { mappingJson: JSON.stringify(opts.customMapping) }
+            : {}),
+        }),
       });
       setPreview(res);
       setSelectedTable(res.selectedTable);
@@ -201,19 +201,18 @@ export function AdminStockImport({
     setCommitting(true);
     setImportError(null);
     try {
-      const preparedFiles = await Promise.all(selectedFiles.map((f) => compactDatabaseFileForUpload(f)));
-      const fd = new FormData();
-      preparedFiles.forEach((f) => fd.append('files', f));
-      fd.append('syncMode', syncMode);
-      if (selectedTable) fd.append('tableName', selectedTable);
-      if (mapping && mapping.name) fd.append('mappingJson', JSON.stringify(mapping));
-      fd.append('generateAccounting', generateAccounting ? 'true' : 'false');
-      if (defaultCategoryId) fd.append('defaultCategoryId', defaultCategoryId);
-      if (saveProfileName.trim()) fd.append('saveProfileName', saveProfileName.trim());
-
+      await uploadDatabaseFilesInChunks(selectedFiles);
       const res = await adminFetch<any>('/api/admin/stock/import/commit', {
         method: 'POST',
-        body: fd,
+        body: JSON.stringify({
+          useStoredBackup: true,
+          syncMode,
+          ...(selectedTable ? { tableName: selectedTable } : {}),
+          ...(mapping && mapping.name ? { mappingJson: JSON.stringify(mapping) } : {}),
+          generateAccounting: generateAccounting ? 'true' : 'false',
+          ...(defaultCategoryId ? { defaultCategoryId } : {}),
+          ...(saveProfileName.trim() ? { saveProfileName: saveProfileName.trim() } : {}),
+        }),
       });
       setCommitResult(res);
       setPreview(null);
