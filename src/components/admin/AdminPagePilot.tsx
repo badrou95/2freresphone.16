@@ -522,7 +522,7 @@ export function AdminPagePilot({
         <div className="space-y-1.5">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-blue-600/20 border border-blue-500/30 text-blue-300 text-xs font-semibold">
             <Sparkles className="w-3.5 h-3.5" />
-            <span>PagePilot : Gemini Vision AI Page Builder</span>
+            <span>2FP VitrinePro IA : Générateur Intelligent de Landing Pages COD</span>
           </div>
           <h2 className="font-display font-bold text-xl">
             Créez toute votre Landing Page uniquement par Photos + Prix de vente
@@ -697,7 +697,7 @@ export function AdminPagePilot({
               ))}
             </div>
 
-            {/* Okwin AI Studio button in Quick Photo Mode */}
+            {/* 2FP Lumina Studio IA button in Quick Photo Mode */}
             {quickPhotos.length > 0 && (
               <div className="pt-1">
                 <button
@@ -708,8 +708,8 @@ export function AdminPagePilot({
                   <Sparkles className="w-3.5 h-3.5" />
                   <span>
                     {showQuickOkwin
-                      ? 'Masquer Okwin AI Studio'
-                      : 'Okwin AI · Modifier l’arrière-plan & Générer 4 images via Prompts'}
+                      ? 'Masquer 2FP Lumina Studio IA'
+                      : '2FP Lumina Studio IA · Modifier l’arrière-plan & Générer 4 images via Prompts'}
                   </span>
                 </button>
               </div>
@@ -776,7 +776,7 @@ export function AdminPagePilot({
           </div>
         </div>
 
-        {/* Okwin AI Photo Studio Expanded inside Quick Mode */}
+        {/* 2FP Lumina Studio IA Expanded inside Quick Mode */}
         {showQuickOkwin && quickPhotos.length > 0 && (
           <OkwinImageStudio
             sourceImageUrl={quickPhotos[0]}
@@ -826,7 +826,7 @@ export function AdminPagePilot({
               <h3 className="font-display font-bold text-base text-slate-900">
                 {editingId
                   ? `Modifier la Landing Page : ${form.title}`
-                  : 'PagePilot AI — Éditeur de Landing Page'}
+                  : '2FP VitrinePro IA — Éditeur de Landing Page'}
               </h3>
             </div>
             <button
@@ -1125,7 +1125,7 @@ export function AdminPagePilot({
                   >
                     <Sparkles className="w-3.5 h-3.5" />
                     <span>
-                      {showBuilderOkwin ? 'Masquer Okwin AI' : 'Okwin AI · Arrière-plan & Prompts'}
+                      {showBuilderOkwin ? 'Masquer 2FP Lumina IA' : '2FP Lumina IA · Arrière-plan & Prompts'}
                     </span>
                   </button>
                 </div>
@@ -1139,7 +1139,7 @@ export function AdminPagePilot({
               availableImages={Array.isArray(form.galleryImages) ? form.galleryImages : []}
             />
 
-            {/* Okwin AI Photo Studio inside Builder */}
+            {/* 2FP Lumina Studio IA inside Builder */}
             {showBuilderOkwin && (
               <OkwinImageStudio
                 sourceImageUrl={form.heroImageUrl || (form.galleryImages || [])[0] || ''}

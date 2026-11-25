@@ -396,6 +396,26 @@ const DDL_STATEMENTS: string[] = [
     created_at timestamp NOT NULL DEFAULT now(),
     updated_at timestamp NOT NULL DEFAULT now()
   )`,
+  `CREATE TABLE IF NOT EXISTS abandoned_orders (
+    id serial PRIMARY KEY,
+    full_name text NOT NULL DEFAULT 'Client',
+    phone text NOT NULL,
+    wilaya_code text NOT NULL DEFAULT '16',
+    wilaya_name text NOT NULL DEFAULT 'Alger',
+    commune text NOT NULL DEFAULT '',
+    delivery_type text NOT NULL DEFAULT 'home',
+    product_id integer REFERENCES products(id) ON DELETE SET NULL,
+    product_name text NOT NULL DEFAULT 'Article en cours',
+    product_price_dzd integer NOT NULL DEFAULT 0,
+    quantity integer NOT NULL DEFAULT 1,
+    selected_color text,
+    source_page text NOT NULL DEFAULT 'product',
+    status text NOT NULL DEFAULT 'en_attente',
+    recovered_order_id integer,
+    notes text NOT NULL DEFAULT '',
+    created_at timestamp NOT NULL DEFAULT now(),
+    updated_at timestamp NOT NULL DEFAULT now()
+  )`,
 ];
 
 async function ensureTablesExist(): Promise<void> {
@@ -450,6 +470,54 @@ async function ensureTablesExist(): Promise<void> {
     }
   } catch (e) {
     console.warn('Skipping landing_pages.colors_json DDL check:', e);
+  }
+
+  try {
+    const orderColCheck = await db.execute(
+      sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'orders' AND column_name = 'call_status'`,
+    );
+    if (!orderColCheck.rows || orderColCheck.rows.length === 0) {
+      await db.execute(
+        sql.raw(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS call_status text NOT NULL DEFAULT 'non_appele'`),
+      );
+      await db.execute(
+        sql.raw(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS call_attempts integer NOT NULL DEFAULT 0`),
+      );
+      await db.execute(
+        sql.raw(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS call_notes text`),
+      );
+    }
+
+    const abTblCheck = await db.execute(
+      sql`SELECT to_regclass('public.abandoned_orders') AS ab_tbl`,
+    );
+    const abRow = abTblCheck.rows?.[0] as { ab_tbl?: string | null } | undefined;
+    if (!abRow?.ab_tbl) {
+      await db.execute(
+        sql.raw(`CREATE TABLE IF NOT EXISTS abandoned_orders (
+          id serial PRIMARY KEY,
+          full_name text NOT NULL DEFAULT 'Client',
+          phone text NOT NULL,
+          wilaya_code text NOT NULL DEFAULT '16',
+          wilaya_name text NOT NULL DEFAULT 'Alger',
+          commune text NOT NULL DEFAULT '',
+          delivery_type text NOT NULL DEFAULT 'home',
+          product_id integer REFERENCES products(id) ON DELETE SET NULL,
+          product_name text NOT NULL DEFAULT 'Article en cours',
+          product_price_dzd integer NOT NULL DEFAULT 0,
+          quantity integer NOT NULL DEFAULT 1,
+          selected_color text,
+          source_page text NOT NULL DEFAULT 'product',
+          status text NOT NULL DEFAULT 'en_attente',
+          recovered_order_id integer,
+          notes text NOT NULL DEFAULT '',
+          created_at timestamp NOT NULL DEFAULT now(),
+          updated_at timestamp NOT NULL DEFAULT now()
+        )`),
+      );
+    }
+  } catch {
+    // Managed by Cloud SQL schema sync
   }
 }
 

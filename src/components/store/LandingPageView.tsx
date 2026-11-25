@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   CheckCircle2,
+  Gift,
   HelpCircle,
   Images,
   MessageCircle,
@@ -14,11 +15,14 @@ import {
   ZoomIn,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
-import { ALGERIA_WILAYAS } from '../../shared/algeria';
+import { initStoreAdPixels, trackAdPixelEvent } from '../../lib/pixels';
+import { ALGERIA_WILAYAS, getCommunesByWilayaCode } from '../../shared/algeria';
 import {
   buildWhatsAppOrderUrl,
   formatDzd,
+  getSaasConfig,
   isValidAlgerianPhone,
+  resolveEffectiveShippingQuote,
 } from '../../shared/domain';
 import { ProductColorOption, StoreBootstrap } from '../../types';
 import { ImageZoomLightbox } from '../ImageZoomLightbox';
@@ -47,6 +51,7 @@ export function LandingPageView({
   const [phone, setPhone] = useState('');
   const [wilayaCode, setWilayaCode] = useState('16');
   const [commune, setCommune] = useState('');
+  const [customCommuneMode, setCustomCommuneMode] = useState(false);
   const [address, setAddress] = useState('');
   const [deliveryType, setDeliveryType] = useState<'home' | 'stop_desk'>('home');
   const [quantity, setQuantity] = useState(1);
@@ -56,8 +61,25 @@ export function LandingPageView({
   const [submitting, setSubmitting] = useState(false);
   const [orderError, setOrderError] = useState<string | null>(null);
   const [createdOrder, setCreatedOrder] = useState<any | null>(null);
+  const [upsellAdded, setUpsellAdded] = useState(false);
+  const [upsellAdding, setUpsellAdding] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string>('');
   const [lightboxOpen, setLightboxOpen] = useState(false);
+
+  const saasConfig = getSaasConfig();
+
+  const wilayaCommunes = useMemo(
+    () => getCommunesByWilayaCode(wilayaCode),
+    [wilayaCode],
+  );
+
+  useEffect(() => {
+    if (saasConfig.communeDropdownEnabled && !customCommuneMode && wilayaCommunes.length > 0) {
+      if (!commune || !wilayaCommunes.includes(commune)) {
+        setCommune(wilayaCommunes[0]);
+      }
+    }
+  }, [wilayaCode, wilayaCommunes, saasConfig.communeDropdownEnabled, customCommuneMode]);
 
   const availableColors: ProductColorOption[] = useMemo(() => {
     if (!page || !Array.isArray(page.colors)) return [];
@@ -79,6 +101,7 @@ export function LandingPageView({
     setError(null);
     setSelectedImage('');
     setSelectedColor('');
+    initStoreAdPixels(saasConfig);
     apiFetch<{ landingPage: any }>(`/api/landing-pages/${encodeURIComponent(slug)}`)
       .then((res) => {
         if (!active) return;
@@ -88,6 +111,18 @@ export function LandingPageView({
             ? res.landingPage.colors[0].name
             : '';
         setSelectedColor(firstColor);
+        if (res.landingPage) {
+          trackAdPixelEvent(
+            'ViewContent',
+            {
+              content_ids: [String(res.landingPage.productId || res.landingPage.id)],
+              content_name: res.landingPage.productName,
+              value: Number(res.landingPage.priceDzd) || 0,
+              currency: 'DZD',
+            },
+            saasConfig,
+          );
+        }
       })
       .catch((err) => {
         if (!active) return;
@@ -108,23 +143,72 @@ export function LandingPageView({
     }
   };
 
-  const currentRate = useMemo(() => {
-    const rates = (bootstrap.shippingRates || []).filter(
-      (r) => r.wilayaCode === wilayaCode && r.isActive,
-    );
-    return rates[0] || null;
-  }, [bootstrap.shippingRates, wilayaCode]);
+  const liveShippingQuote = useMemo(
+    () =>
+      resolveEffectiveShippingQuote({
+        carriers: bootstrap.carriers || [],
+        shippingRates: bootstrap.shippingRates || [],
+        wilayaCode,
+        deliveryType,
+        shippingPricesEnabled: saasConfig.shippingPricesEnabled,
+      }),
+    [bootstrap.carriers, bootstrap.shippingRates, deliveryType, saasConfig.shippingPricesEnabled, wilayaCode],
+  );
 
-  const shippingFeeDzd = useMemo(() => {
-    if (!currentRate) return 500;
-    return deliveryType === 'stop_desk'
-      ? currentRate.stopDeskPriceDzd
-      : currentRate.homePriceDzd;
-  }, [currentRate, deliveryType]);
+  useEffect(() => {
+    if (liveShippingQuote.effectiveDeliveryType !== deliveryType) {
+      setDeliveryType(liveShippingQuote.effectiveDeliveryType);
+    }
+  }, [deliveryType, liveShippingQuote.effectiveDeliveryType]);
+
+  const shippingFeeDzd = liveShippingQuote.feeDzd;
 
   const unitPriceDzd = Number(page?.priceDzd) || 0;
   const subtotalDzd = unitPriceDzd * quantity;
   const totalDzd = subtotalDzd + shippingFeeDzd;
+
+  // Real-time Abandoned COD Order auto-capture on Landing Page
+  useEffect(() => {
+    if (!saasConfig.abandonedOrdersCaptureEnabled || !page || createdOrder) return;
+    if (!isValidAlgerianPhone(phone)) return;
+
+    const timer = setTimeout(() => {
+      apiFetch('/api/abandoned-orders/capture', {
+        method: 'POST',
+        body: JSON.stringify({
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          phone: phone.trim(),
+          wilayaCode,
+          commune: commune.trim(),
+          address: address.trim(),
+          deliveryType: liveShippingQuote.effectiveDeliveryType,
+          productId: page.productId || null,
+          productName: selectedColor
+            ? `${page.productName} (Couleur : ${selectedColor})`
+            : page.productName,
+          quantity,
+          totalDzd,
+          source: 'landing_page',
+        }),
+      }).catch(() => {});
+    }, 900);
+
+    return () => clearTimeout(timer);
+  }, [
+    phone,
+    firstName,
+    lastName,
+    wilayaCode,
+    commune,
+    address,
+    quantity,
+    selectedColor,
+    totalDzd,
+    page,
+    createdOrder,
+    saasConfig.abandonedOrdersCaptureEnabled,
+  ]);
 
   const handleSubmitOrder = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -145,8 +229,14 @@ export function LandingPageView({
         wilayaCode,
         commune: commune.trim(),
         address: address.trim() || commune.trim(),
-        deliveryType,
-        carrierId: currentRate?.carrierId,
+        deliveryType: liveShippingQuote.effectiveDeliveryType,
+        carrierId: liveShippingQuote.carrier?.id,
+        shippingPricesEnabled: saasConfig.shippingPricesEnabled,
+        antiSpamEnabled: saasConfig.antiSpamEnabled,
+        antiSpamCooldownMinutes: saasConfig.antiSpamCooldownMinutes,
+        googleSheetsWebhookUrl: saasConfig.googleSheetsSyncEnabled
+          ? saasConfig.googleSheetsWebhookUrl
+          : '',
         customerNotes:
           customerNotes.trim() ||
           `Commande via Landing Page : ${page.title}${selectedColor ? ` (Couleur : ${selectedColor})` : ''}`,
@@ -168,6 +258,18 @@ export function LandingPageView({
         body: JSON.stringify(payload),
       });
       setCreatedOrder(res.order);
+      setUpsellAdded(false);
+      trackAdPixelEvent(
+        'Purchase',
+        {
+          content_ids: [String(page.productId || page.id)],
+          content_name: page.productName,
+          value: res.order.totalDzd,
+          currency: 'DZD',
+          num_items: quantity,
+        },
+        saasConfig,
+      );
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err: any) {
       setOrderError(err?.message || 'Impossible d’enregistrer votre commande.');
@@ -225,6 +327,35 @@ export function LandingPageView({
       totalDzd: createdOrder.totalDzd,
     });
 
+    const discountPct = Math.max(5, Math.min(60, Number(saasConfig.postPurchaseUpsellDiscountPct) || 20));
+    const upsellUnitPrice = Math.max(200, Math.round(unitPriceDzd * (1 - discountPct / 100)));
+
+    const handleAcceptUpsell = async () => {
+      if (upsellAdding || upsellAdded) return;
+      setUpsellAdding(true);
+      try {
+        const res = await apiFetch<{ order: any }>(
+          `/api/orders/${encodeURIComponent(createdOrder.reference)}/upsell`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              productId: page.productId || null,
+              customName: `${page.productName} (2e unité -${discountPct}%)`,
+              quantity: 1,
+              discountPct,
+              customPriceDzd: upsellUnitPrice,
+            }),
+          },
+        );
+        setCreatedOrder(res.order);
+        setUpsellAdded(true);
+      } catch {
+        // ignore
+      } finally {
+        setUpsellAdding(false);
+      }
+    };
+
     return (
       <div className="max-w-2xl mx-auto px-4 py-12">
         <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 text-center space-y-5 shadow-sm">
@@ -245,6 +376,46 @@ export function LandingPageView({
               </span>
             </p>
           </div>
+
+          {saasConfig.postPurchaseUpsellEnabled && (
+            <div className="p-4 rounded-xl border-2 border-amber-400 bg-amber-50/80 text-left space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500 text-white text-[11px] font-bold">
+                  <Gift className="w-3.5 h-3.5" />
+                  OFFRE POST-ACHAT EN 1 CLIC (-{discountPct}% · 0 DZD LIVRAISON)
+                </span>
+              </div>
+              {upsellAdded ? (
+                <p className="text-xs font-bold text-emerald-800 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  2e unité ajoutée à votre colis avec -{discountPct}% de remise (Paiement à la livraison) !
+                </p>
+              ) : (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold text-slate-900">
+                      Ajoutez une 2e unité de {page.productName} dans le même colis
+                    </p>
+                    <p className="text-xs text-slate-600 mt-0.5">
+                      Seulement{' '}
+                      <span className="font-mono font-bold text-emerald-700">
+                        {formatDzd(upsellUnitPrice)}
+                      </span>{' '}
+                      au lieu de <span className="line-through">{formatDzd(unitPriceDzd)}</span>
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={upsellAdding}
+                    onClick={handleAcceptUpsell}
+                    className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold"
+                  >
+                    {upsellAdding ? 'Ajout...' : '+ Ajouter en 1 clic à ma commande'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-left text-xs space-y-2">
             <div className="flex justify-between">
@@ -577,63 +748,111 @@ export function LandingPageView({
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Commune *
-                  </label>
-                  <input
-                    required
-                    value={commune}
-                    onChange={(e) => setCommune(e.target.value)}
-                    placeholder="Ex. Bab Ezzouar"
-                    className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
-                  />
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold text-slate-700">
+                      Commune *
+                    </label>
+                    {saasConfig.communeDropdownEnabled && wilayaCommunes.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomCommuneMode((m) => !m);
+                          if (!customCommuneMode) setCommune('');
+                          else setCommune(wilayaCommunes[0] || '');
+                        }}
+                        className="text-[11px] font-semibold text-blue-700 hover:underline"
+                      >
+                        {customCommuneMode ? 'Liste' : 'Autre'}
+                      </button>
+                    )}
+                  </div>
+                  {saasConfig.communeDropdownEnabled && !customCommuneMode && wilayaCommunes.length > 0 ? (
+                    <select
+                      required
+                      value={commune}
+                      onChange={(e) => setCommune(e.target.value)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 bg-white"
+                    >
+                      {wilayaCommunes.map((cName) => (
+                        <option key={cName} value={cName}>
+                          {cName}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      required
+                      value={commune}
+                      onChange={(e) => setCommune(e.target.value)}
+                      placeholder="Ex. Bab Ezzouar"
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
+                    />
+                  )}
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Adresse de livraison *
-                </label>
-                <input
-                  required
-                  value={address}
-                  onChange={(e) => setAddress(e.target.value)}
-                  placeholder="Quartier, rue ou bureau Stop Desk"
-                  className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
-                />
-              </div>
+              {saasConfig.formShowAddressField && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Adresse de livraison *
+                  </label>
+                  <input
+                    required
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    placeholder="Quartier, rue ou bureau Stop Desk"
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300"
+                  />
+                </div>
+              )}
 
               {/* Delivery Mode & Quantity */}
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setDeliveryType('home')}
-                  className={`p-2.5 rounded-xl border text-left text-xs transition-colors ${
-                    deliveryType === 'home'
-                      ? 'border-blue-700 bg-blue-50/70 font-semibold text-slate-900'
-                      : 'border-slate-200 text-slate-600'
+              {(liveShippingQuote.supportsHome || liveShippingQuote.supportsStopDesk) && (
+                <div
+                  className={`grid gap-2 pt-1 ${
+                    liveShippingQuote.supportsHome && liveShippingQuote.supportsStopDesk
+                      ? 'grid-cols-2'
+                      : 'grid-cols-1'
                   }`}
                 >
-                  <span className="block">À domicile</span>
-                  <span className="font-mono font-bold text-blue-700">
-                    {formatDzd(currentRate?.homePriceDzd ?? 600)}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDeliveryType('stop_desk')}
-                  className={`p-2.5 rounded-xl border text-left text-xs transition-colors ${
-                    deliveryType === 'stop_desk'
-                      ? 'border-blue-700 bg-blue-50/70 font-semibold text-slate-900'
-                      : 'border-slate-200 text-slate-600'
-                  }`}
-                >
-                  <span className="block">Stop Desk (Bureau)</span>
-                  <span className="font-mono font-bold text-blue-700">
-                    {formatDzd(currentRate?.stopDeskPriceDzd ?? 400)}
-                  </span>
-                </button>
-              </div>
+                  {liveShippingQuote.supportsHome && (
+                    <button
+                      type="button"
+                      onClick={() => setDeliveryType('home')}
+                      className={`p-2.5 rounded-xl border text-left text-xs transition-colors ${
+                        liveShippingQuote.effectiveDeliveryType === 'home'
+                          ? 'border-blue-700 bg-blue-50/70 font-semibold text-slate-900'
+                          : 'border-slate-200 text-slate-600'
+                      }`}
+                    >
+                      <span className="block">À domicile</span>
+                      <span className="font-mono font-bold text-blue-700">
+                        {!liveShippingQuote.pricesActive
+                          ? "Tarif confirmé à l'appel"
+                          : formatDzd(liveShippingQuote.homePriceDzd)}
+                      </span>
+                    </button>
+                  )}
+                  {liveShippingQuote.supportsStopDesk && (
+                    <button
+                      type="button"
+                      onClick={() => setDeliveryType('stop_desk')}
+                      className={`p-2.5 rounded-xl border text-left text-xs transition-colors ${
+                        liveShippingQuote.effectiveDeliveryType === 'stop_desk'
+                          ? 'border-blue-700 bg-blue-50/70 font-semibold text-slate-900'
+                          : 'border-slate-200 text-slate-600'
+                      }`}
+                    >
+                      <span className="block">Stop Desk (Bureau)</span>
+                      <span className="font-mono font-bold text-blue-700">
+                        {!liveShippingQuote.pricesActive
+                          ? "Tarif confirmé à l'appel"
+                          : formatDzd(liveShippingQuote.stopDeskPriceDzd)}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              )}
 
               <div className="flex items-center justify-between pt-1">
                 <span className="text-xs font-semibold text-slate-700">Quantité :</span>
@@ -670,10 +889,12 @@ export function LandingPageView({
                 </div>
                 <div className="flex justify-between text-slate-600">
                   <span>
-                    Livraison ({deliveryType === 'stop_desk' ? 'Stop Desk' : 'À domicile'})
+                    Livraison ({liveShippingQuote.effectiveDeliveryType === 'stop_desk' ? 'Stop Desk' : 'À domicile'})
                   </span>
                   <span className="font-mono font-semibold text-slate-900">
-                    {formatDzd(shippingFeeDzd)}
+                    {!liveShippingQuote.pricesActive
+                      ? "Confirmée à l'appel"
+                      : formatDzd(shippingFeeDzd)}
                   </span>
                 </div>
                 <div className="flex justify-between pt-2 border-t border-slate-200 text-sm font-bold text-slate-900">

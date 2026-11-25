@@ -4,11 +4,14 @@ import {
   CheckCircle2,
   Cpu,
   Database,
+  Download,
+  FileCode2,
   FileSpreadsheet,
   HardDrive,
   Layers,
   RefreshCw,
   Save,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Upload,
@@ -212,9 +215,12 @@ export function MdfIdfBinaryDecoderModule({
   const [mdfFile, setMdfFile] = useState<File | null>(null);
   const [idfFile, setIdfFile] = useState<File | null>(null);
   const [extraFiles, setExtraFiles] = useState<File[]>([]);
-  const [syncMode, setSyncMode] = useState<'full_sync' | 'add_and_update_stock' | 'add_only'>('full_sync');
+  const [syncMode, setSyncMode] = useState<
+    'update_stock_and_prices' | 'add_and_update_stock' | 'add_only' | 'full_sync'
+  >('update_stock_and_prices');
   const [generateAccounting, setGenerateAccounting] = useState<boolean>(true);
-  const [cleanPreviousImports, setCleanPreviousImports] = useState<boolean>(true);
+  // IMPORTANT: cleanPreviousImports is FALSE by default so updating a file NEVER deletes existing photos or edited texts!
+  const [cleanPreviousImports, setCleanPreviousImports] = useState<boolean>(false);
   const [defaultCategoryId, setDefaultCategoryId] = useState<string>('');
   const [autoIntegrateOnSelect, setAutoIntegrateOnSelect] = useState<boolean>(false);
 
@@ -222,6 +228,8 @@ export function MdfIdfBinaryDecoderModule({
   const [committing, setCommitting] = useState<boolean>(false);
   const [cleaningUp, setCleaningUp] = useState<boolean>(false);
   const [regenerating, setRegenerating] = useState<boolean>(false);
+  const [exportingSql, setExportingSql] = useState<boolean>(false);
+  const [restoringSql, setRestoringSql] = useState<boolean>(false);
   const [preview, setPreview] = useState<any | null>(null);
   const [selectedTableName, setSelectedTableName] = useState<string>('');
   const [customMapping, setCustomMapping] = useState<Record<string, string>>({ name: '' });
@@ -394,7 +402,7 @@ export function MdfIdfBinaryDecoderModule({
         body: JSON.stringify({
           syncMode,
           generateAccounting,
-          cleanPreviousImports: true,
+          cleanPreviousImports,
           tableName: selectedTableName || undefined,
           mapping: customMapping?.name ? customMapping : undefined,
           defaultCategoryId: defaultCategoryId ? Number(defaultCategoryId) : null,
@@ -402,16 +410,80 @@ export function MdfIdfBinaryDecoderModule({
       });
       setCommitResult(res);
       setStatusBanner(
-        `Fichier ${res.importRecord?.fileName || savedBackupFileName || '.MDF'} régénéré et corrigé avec succès !`,
+        `Fichier ${res.importRecord?.fileName || savedBackupFileName || '.MDF'} mis à jour avec succès (photos et textes modifiés conservés) !`,
       );
       onRefresh();
     } catch (err: any) {
       setErrorMsg(
         err?.message ||
-          'Veuillez resélectionner votre fichier .MDF dans le Point 1 ci-dessus puis cliquer sur « Sauvegarder & Intégrer maintenant ».',
+          'Veuillez sélectionner votre fichier .MDF dans le Point 1 ci-dessus puis cliquer sur « Mettre à jour / Sauvegarder ».',
       );
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  const handleExportSqlBackup = async (scope: 'full' | 'catalog_photos_compta' = 'full') => {
+    setExportingSql(true);
+    setErrorMsg(null);
+    setStatusBanner(null);
+    try {
+      const res = await adminFetch<{
+        filename: string;
+        sqlContent: string;
+        stats: {
+          categoriesCount: number;
+          productsCount: number;
+          imagesCount: number;
+          accountingCount: number;
+        };
+      }>(`/api/admin/database/export-sql?scope=${scope}`);
+
+      const blob = new Blob([res.sqlContent], { type: 'application/sql;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = res.filename || `2freres-phone-sauvegarde-${new Date().toISOString().slice(0, 10)}.sql`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      setStatusBanner(
+        `Sauvegarde .SQL extraite avec succès (${res.filename}) : ${res.stats.productsCount} produit(s), ${res.stats.imagesCount} photo(s), ${res.stats.categoriesCount} catégorie(s) et ${res.stats.accountingCount} écriture(s) comptable(s).`,
+      );
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Erreur lors de l’extraction de la sauvegarde .SQL.');
+    } finally {
+      setExportingSql(false);
+    }
+  };
+
+  const handleRestoreSqlBackup = async (file: File | null) => {
+    if (!file) return;
+    setRestoringSql(true);
+    setErrorMsg(null);
+    setStatusBanner(`Restauration / Mise à jour depuis ${file.name} en cours...`);
+    try {
+      const sqlContent = await file.text();
+      const res = await adminFetch<any>('/api/admin/database/restore-sql', {
+        method: 'POST',
+        body: JSON.stringify({
+          sqlContent,
+          fileName: file.name,
+        }),
+      });
+      setStatusBanner(
+        res.message ||
+          `Fichier ${file.name} restauré et mis à jour avec succès (photos et textes conservés).`,
+      );
+      if (res.importRecord) {
+        setCommitResult(res);
+      }
+      onRefresh();
+    } catch (err: any) {
+      setStatusBanner(null);
+      setErrorMsg(err?.message || 'Erreur lors de la restauration du fichier .SQL.');
+    } finally {
+      setRestoringSql(false);
     }
   };
 
@@ -480,34 +552,33 @@ export function MdfIdfBinaryDecoderModule({
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-blue-700 text-white text-xs font-bold uppercase tracking-wider shadow-sm">
               <Cpu className="w-3.5 h-3.5" />
-              <span>Module Décodage Binaire .MDF + .IDF · Ajouter le Stock &amp; Compta</span>
+              <span>Module Base de Données .MDF + .IDF + .SQL · Mise à Jour Sans Perdre Photos &amp; Textes</span>
             </span>
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-900 text-[11px] font-bold">
-              <Database className="w-3.5 h-3.5" />
-              <span>Décodage Exact Pages 8Ko SQL Server · Références, Désignations, Prix d’achat/vente &amp; Quantités</span>
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Conserve 100 % de vos Photos Lumina Studio 2FP, Textes modifiés, Titres &amp; Catégories</span>
             </span>
           </div>
           <h2 className="font-display font-bold text-base sm:text-lg text-slate-900">
-            Ajouter le Stock &amp; Générer toute votre Comptabilité depuis vos fichiers .MDF et .IDF
+            Mettre à jour votre Stock &amp; votre Comptabilité sans tout régénérer (Photos &amp; Textes protégés)
           </h2>
           <p className="text-xs sm:text-sm text-slate-600">
-            Chargez votre fichier <strong>.MDF</strong> (Point 1) et votre fichier <strong>.IDF</strong> (Point 2) ci-dessous : le système retire automatiquement les anciennes lignes mélangées (2 200 DZD / SQL) et restaure les vrais codes, désignations, prix d’achat, prix de vente et quantités.
+            Chargez votre fichier <strong>.MDF</strong> (Point 1), <strong>.IDF</strong> (Point 2) ou <strong>.SQL</strong> : le système met à jour uniquement les quantités, prix d’achat et prix de vente des produits existants et ajoute les nouveaux articles <strong>sans jamais effacer vos photos ni vos textes modifiés</strong>.
           </p>
         </div>
 
-        {/* Quick Action Buttons: Clean Corrupted Import + Regenerate + 1-Click Upload */}
+        {/* Quick Action Buttons: SQL Export + Update + Clean Corrupted Import */}
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            disabled={cleaningUp || committing}
-            onClick={handleCleanupCorruptedImport}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-sm cursor-pointer transition-colors"
+            disabled={exportingSql}
+            onClick={() => handleExportSqlBackup('full')}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold shadow-sm cursor-pointer transition-colors"
+            title="Extraire toute votre base (Produits, Photos, Textes, Catégories, Stock & Compta) en fichier .SQL"
           >
-            <Trash2 className="w-3.5 h-3.5" />
+            <Download className="w-3.5 h-3.5" />
             <span>
-              {cleaningUp
-                ? 'Nettoyage en cours...'
-                : 'Nettoyer l’ancien import erroné (2 200 DZD / SQL)'}
+              {exportingSql ? 'Extraction .SQL...' : 'Extraire Sauvegarde (.SQL)'}
             </span>
           </button>
 
@@ -521,15 +592,15 @@ export function MdfIdfBinaryDecoderModule({
               <RefreshCw className={`w-3.5 h-3.5 ${regenerating ? 'animate-spin' : ''}`} />
               <span>
                 {regenerating
-                  ? 'Régénération en cours...'
-                  : 'Régénérer & Corriger le fichier envoyé'}
+                  ? 'Mise à jour en cours...'
+                  : 'Mettre à jour depuis le fichier (Garder Photos & Textes)'}
               </span>
             </button>
           )}
 
           <label className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-sm cursor-pointer transition-colors">
             <Sparkles className="w-4 h-4" />
-            <span>Sélectionner .MDF + .IDF &amp; Intégrer en 1 Clic</span>
+            <span>Mettre à jour .MDF + .IDF en 1 Clic</span>
             <input
               type="file"
               multiple
@@ -538,6 +609,133 @@ export function MdfIdfBinaryDecoderModule({
               className="hidden"
             />
           </label>
+        </div>
+      </div>
+
+      {/* MODULE 1: SAUVEGARDE & EXTRACTION .SQL (AVEC PHOTOS, TEXTES MODIFIÉS, CATÉGORIES & COMPTA) */}
+      <div className="p-4 rounded-xl bg-slate-900 text-white border border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-amber-500 text-slate-950 text-[11px] font-bold uppercase">
+              <FileCode2 className="w-3.5 h-3.5" />
+              <span>Sauvegarde &amp; Extraction .SQL</span>
+            </span>
+            <span className="text-xs text-slate-300 font-medium">
+              Sauvegardez tout votre travail (Photos Lumina Studio 2FP, Textes personnalisés, Catégories, Prix &amp; Compta) dans un fichier <strong>.sql</strong>
+            </span>
+          </div>
+          <p className="text-xs text-slate-400">
+            Extrayez votre base de données en <strong>.sql</strong> sur votre ordinateur ou téléphone pour ne jamais refaire vos photos ni vos textes, ou réimportez un fichier <strong>.sql</strong> à tout moment.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            disabled={exportingSql}
+            onClick={() => handleExportSqlBackup('full')}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold shadow-sm cursor-pointer transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>{exportingSql ? 'Génération...' : 'Télécharger Sauvegarde Complète (.SQL)'}</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={exportingSql}
+            onClick={() => handleExportSqlBackup('catalog_photos_compta')}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs font-semibold cursor-pointer transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Catalogue + Photos + Textes (.SQL)</span>
+          </button>
+
+          <label className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold cursor-pointer transition-colors">
+            <Upload className="w-3.5 h-3.5" />
+            <span>{restoringSql ? 'Restauration...' : 'Importer / Restaurer un .SQL'}</span>
+            <input
+              type="file"
+              accept=".sql"
+              onChange={(e) => {
+                handleRestoreSqlBackup(e.target.files?.[0] || null);
+                e.target.value = '';
+              }}
+              className="hidden"
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* MODULE 2: CHOIX DU MODE DE MISE À JOUR DIFFÉRENTIELLE (SANS TOUT RÉGÉNÉRER) */}
+      <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-blue-700" />
+            <h3 className="text-xs sm:text-sm font-bold text-blue-950">
+              Module de Mise à Jour sans Tout Régénérer (Protège vos Photos, Titres &amp; Textes modifiés)
+            </h3>
+          </div>
+          <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-[11px] font-bold">
+            Photos &amp; Textes 100 % Conservés
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+          {[
+            {
+              id: 'update_stock_and_prices',
+              badge: 'Recommandé (Par défaut)',
+              title: '1. Mettre à jour Stock & Prix (Garder Photos & Textes)',
+              desc: 'Met à jour uniquement les quantités, prix d’achat et prix de vente + ajoute les nouveaux articles. Ne touche JAMAIS à vos photos ni à vos textes modifiés.',
+            },
+            {
+              id: 'add_and_update_stock',
+              badge: 'Stock seul',
+              title: '2. Mettre à jour Quantités uniquement + Nouveaux',
+              desc: 'Met à jour seulement les quantités en stock et ajoute les nouveaux produits. Conserve vos prix personnalisés, vos photos et vos textes.',
+            },
+            {
+              id: 'add_only',
+              badge: 'Nouveautés seules',
+              title: '3. Ajouter uniquement les nouveaux articles',
+              desc: 'Ignore tous les produits déjà présents sur le site et ajoute seulement les nouvelles références du fichier.',
+            },
+            {
+              id: 'full_sync',
+              badge: 'Complet',
+              title: '4. Synchroniser Stock + Prix + Descriptions du fichier',
+              desc: 'Met à jour stock, prix et descriptions depuis le fichier tout en conservant toujours 100 % des photos existantes.',
+            },
+          ].map((mode) => {
+            const active = syncMode === mode.id;
+            return (
+              <button
+                key={mode.id}
+                type="button"
+                onClick={() => setSyncMode(mode.id as any)}
+                className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between ${
+                  active
+                    ? 'border-blue-700 bg-white ring-2 ring-blue-600/20 shadow-sm'
+                    : 'border-slate-200 bg-white/80 hover:border-blue-300'
+                }`}
+              >
+                <div>
+                  <div className="flex items-center justify-between gap-1.5 mb-1">
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        active ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {mode.badge}
+                    </span>
+                    {active && <CheckCircle2 className="w-4 h-4 text-blue-700 shrink-0" />}
+                  </div>
+                  <p className="text-xs font-bold text-slate-900">{mode.title}</p>
+                  <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">{mode.desc}</p>
+                </div>
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -562,7 +760,7 @@ export function MdfIdfBinaryDecoderModule({
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-blue-800">
-                  Point 1 · Fichier Base de Données (.MDF)
+                  Point 1 · Fichier Base de Données (.MDF / .SQL)
                 </span>
                 {mdfFile && (
                   <span className="px-2 py-0.5 rounded bg-blue-700 text-white text-[10px] font-bold">
@@ -571,12 +769,12 @@ export function MdfIdfBinaryDecoderModule({
                 )}
               </div>
               <p className="font-display font-bold text-sm text-slate-900 mt-1 truncate">
-                {mdfFile ? mdfFile.name : 'Cliquez ici pour uploader votre fichier .MDF'}
+                {mdfFile ? mdfFile.name : 'Cliquez ici pour uploader votre fichier .MDF ou .SQL'}
               </p>
               <p className="text-xs text-slate-600 mt-1">
                 {mdfFile
                   ? `Taille : ${Math.max(1, Math.round(mdfFile.size / 1024))} Ko · Pages 8Ko alignées sans perte`
-                  : 'Décodage exact des tables Product, Stock, Prix d’achat (CostPrice), Prix de vente (SellingPrice) & Quantités'}
+                  : 'Mise à jour intelligente des tables Product, Stock, Prix d’achat, Prix de vente & Quantités'}
               </p>
             </div>
           </div>
@@ -678,9 +876,12 @@ export function MdfIdfBinaryDecoderModule({
             onChange={(e) => setSyncMode(e.target.value as any)}
             className="w-full px-3 py-2.5 text-xs rounded-xl border border-slate-300 bg-white font-semibold text-slate-800"
           >
-            <option value="full_sync">Mode : Sync complète (Stock + Prix + Compta)</option>
-            <option value="add_and_update_stock">Mode : Ajouter + Mettre à jour quantités</option>
+            <option value="update_stock_and_prices">
+              Mode : Stock &amp; Prix (Conserve Photos &amp; Textes)
+            </option>
+            <option value="add_and_update_stock">Mode : Quantités seules + Nouveaux</option>
             <option value="add_only">Mode : Nouveaux produits uniquement</option>
+            <option value="full_sync">Mode : Sync complète (Stock + Prix + Textes)</option>
           </select>
         </div>
       </div>
@@ -702,20 +903,8 @@ export function MdfIdfBinaryDecoderModule({
                 }`}
               >
                 <Save className="w-3.5 h-3.5" />
-                <span>Action d’intégration Base de Données</span>
+                <span>Action de Mise à Jour Base de Données</span>
               </span>
-
-              <label className="inline-flex items-center gap-1.5 text-xs font-bold text-red-900 bg-red-100/80 px-2.5 py-1 rounded-lg cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={cleanPreviousImports}
-                  onChange={(e) => setCleanPreviousImports(e.target.checked)}
-                  className="w-3.5 h-3.5 rounded text-red-700"
-                />
-                <span>
-                  Retirer et remplacer l’ancien stock importé erroné (2 200 DZD / SQL)
-                </span>
-              </label>
 
               <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-950 cursor-pointer">
                 <input
@@ -724,7 +913,7 @@ export function MdfIdfBinaryDecoderModule({
                   onChange={(e) => setGenerateAccounting(e.target.checked)}
                   className="w-3.5 h-3.5 rounded text-emerald-700"
                 />
-                <span>Générer aussi toute la Comptabilité (Bilan, Achats, Ventes, Marges)</span>
+                <span>Mettre à jour aussi la Comptabilité (Bilan, Achats, Ventes, Marges)</span>
               </label>
 
               <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-900 cursor-pointer">
@@ -734,7 +923,22 @@ export function MdfIdfBinaryDecoderModule({
                   onChange={(e) => setAutoIntegrateOnSelect(e.target.checked)}
                   className="w-3.5 h-3.5 rounded text-blue-700"
                 />
-                <span>Intégration auto dès sélection</span>
+                <span>Mise à jour auto dès sélection</span>
+              </label>
+
+              <label
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 bg-white/80 border border-slate-300 px-2.5 py-1 rounded-lg cursor-pointer"
+                title="Laissez décoché pour conserver vos produits existants, vos photos et vos textes modifiés"
+              >
+                <input
+                  type="checkbox"
+                  checked={cleanPreviousImports}
+                  onChange={(e) => setCleanPreviousImports(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded text-red-700"
+                />
+                <span>
+                  Tout réinitialiser (Attention : laisser décoché pour garder photos &amp; textes)
+                </span>
               </label>
             </div>
 
@@ -742,19 +946,18 @@ export function MdfIdfBinaryDecoderModule({
               {parsing
                 ? 'Décodage binaire des pages 8Ko .MDF / .IDF en cours...'
                 : allFiles.length > 0
-                ? `Prêt à sauvegarder : ${allFiles.map((f) => f.name).join(' + ')}${
+                ? `Prêt à mettre à jour : ${allFiles.map((f) => f.name).join(' + ')}${
                     preview
-                      ? ` → ${
-                          (preview.diffSummary?.toAddCount || 0) +
-                          (preview.diffSummary?.toUpdateCount || 0)
-                        } article(s) Stock + ${
+                      ? ` → +${preview.diffSummary?.toAddCount || 0} nouveau(x), ${
+                          preview.diffSummary?.toUpdateCount || 0
+                        } mis à jour (photos & textes conservés) + ${
                           preview.accountingPreview?.totalEntries ?? 0
-                        } écriture(s) Compta décodés`
+                        } écriture(s) Compta`
                       : ''
                   }`
                 : hasSavedBackupOnServer
-                ? `Sauvegarde détectée (${savedBackupFileName}) : cliquez sur « Régénérer & Corriger le fichier envoyé » ou chargez un nouveau .MDF`
-                : 'Étape 1 : Choisissez votre fichier .MDF et/ou .IDF ci-dessus · Étape 2 : Cliquez sur le bouton vert à droite'}
+                ? `Sauvegarde détectée (${savedBackupFileName}) : cliquez sur « Mettre à jour & Sauvegarder » ou chargez un nouveau fichier`
+                : 'Étape 1 : Choisissez votre fichier .MDF / .IDF / .SQL ci-dessus · Étape 2 : Cliquez sur le bouton vert à droite'}
             </p>
           </div>
 
@@ -800,8 +1003,8 @@ export function MdfIdfBinaryDecoderModule({
               <Upload className="w-4 h-4" />
               <span>
                 {committing
-                  ? 'Sauvegarde & Intégration du Stock + Compta en cours...'
-                  : 'SAUVEGARDER & INTÉGRER MAINTENANT (GÉNÉRER STOCK + COMPTA)'}
+                  ? 'Mise à jour du Stock + Compta en cours...'
+                  : 'METTRE À JOUR & SAUVEGARDER (GARDER PHOTOS & TEXTES)'}
               </span>
             </button>
           </div>

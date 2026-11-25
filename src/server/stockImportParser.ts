@@ -15,7 +15,11 @@ export type SupportedImportFormat =
   | 'sqlite'
   | 'sql';
 
-export type StockSyncMode = 'add_only' | 'add_and_update_stock' | 'full_sync';
+export type StockSyncMode =
+  | 'update_stock_and_prices'
+  | 'add_only'
+  | 'add_and_update_stock'
+  | 'full_sync';
 
 export interface ColumnMapping {
   name: string;
@@ -2819,8 +2823,10 @@ export function buildDifferentialSyncPlan(
 
     const matched =
       (rawSku && bySku.get(normalizeMatchKey(rawSku))) ||
+      bySku.get(normalizeMatchKey(derivedSku)) ||
       (rawBarcode && byBarcode.get(normalizeMatchKey(rawBarcode))) ||
       (rawSku && byExternalRef.get(normalizeMatchKey(rawSku))) ||
+      byExternalRef.get(normalizedNameKey) ||
       byName.get(normalizedNameKey);
 
     if (!matched) {

@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   Clock,
+  Copy,
   Eye,
   Flame,
   Landmark,
@@ -13,6 +14,7 @@ import {
   Palette,
   PhoneCall,
   Plus,
+  Share2,
   ShieldCheck,
   ShoppingBag,
   Sparkles,
@@ -21,12 +23,14 @@ import {
   ZoomIn,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
-import { ALGERIA_WILAYAS } from '../../shared/algeria';
+import { initStoreAdPixels, trackAdPixelEvent } from '../../lib/pixels';
+import { ALGERIA_WILAYAS, getCommunesByWilayaCode } from '../../shared/algeria';
 import {
   buildWhatsAppOrderUrl,
   formatDzd,
   getSaasConfig,
   isValidAlgerianPhone,
+  resolveEffectiveShippingQuote,
 } from '../../shared/domain';
 import {
   ProductColorOption,
@@ -38,6 +42,20 @@ import {
 import { ImageZoomLightbox } from '../ImageZoomLightbox';
 import { ProductImage } from '../ProductImage';
 import { StarInput, StarRating } from '../StarRating';
+
+const COMPATIBLE_PHONE_MODELS = [
+  'Universel / Standard',
+  'iPhone 16 / 16 Pro / 16 Pro Max',
+  'iPhone 15 / 15 Pro / 15 Pro Max',
+  'iPhone 14 / 14 Pro / 14 Pro Max',
+  'iPhone 13 / 13 Pro / 13 Pro Max',
+  'iPhone 11 / 12 / 12 Pro',
+  'Samsung Galaxy S24 / S24 Ultra',
+  'Samsung Galaxy S23 / S22 Ultra',
+  'Samsung Galaxy A55 / A54 / A34 / A15',
+  'Xiaomi Redmi Note 13 / 13 Pro / 12',
+  'Type-C Universel / Android',
+];
 
 interface ProductDetailViewProps {
   slug: string;
@@ -71,11 +89,13 @@ export function ProductDetailView({
   const [quantity, setQuantity] = useState(1);
   const [selectedBundle, setSelectedBundle] = useState<1 | 2 | 3>(1);
   const [selectedColor, setSelectedColor] = useState<string>('');
+  const [selectedModelVariant, setSelectedModelVariant] = useState<string>('');
   const [selectedCrossSellIds, setSelectedCrossSellIds] = useState<number[]>([]);
   const [saasConfig, setSaasConfig] = useState(() => getSaasConfig());
+  const [shareLinkCopied, setShareLinkCopied] = useState(false);
   const expressFormRef = useRef<HTMLDivElement | null>(null);
 
-  // Direct 1-Page COD Express Order Form State (DZBuild / Arkan / YouCan / Mystoq / Hanoutify) — 100% COD
+  // Direct 1-Page COD Express Order Form State (2FP ExpressCheckout & FormBuilder) — 100% COD
   const [expressFullName, setExpressFullName] = useState(() => {
     try {
       return localStorage.getItem('2fp_cod_draft_name') || '';
@@ -104,14 +124,29 @@ export function ProductDetailView({
       return '';
     }
   });
+  const [customCommuneMode, setCustomCommuneMode] = useState(false);
   const [expressAddress, setExpressAddress] = useState('');
+  const [expressNotes, setExpressNotes] = useState('');
   const [expressDeliveryType, setExpressDeliveryType] = useState<'home' | 'stop_desk'>('home');
   const [expressCarrierId, setExpressCarrierId] = useState<number | null>(null);
   const [expressSubmitting, setExpressSubmitting] = useState(false);
   const [expressError, setExpressError] = useState<string | null>(null);
   const [expressSuccessOrder, setExpressSuccessOrder] = useState<any | null>(null);
+  const [upsellAdding, setUpsellAdding] = useState(false);
+  const [upsellAddedMessage, setUpsellAddedMessage] = useState<string | null>(null);
 
-  // Auto-save COD form draft to localStorage so returning customers order in 5 seconds (Hanoutify / Colisify)
+  // Available communes for the selected Wilaya (2FP Official Communes Selector)
+  const wilayaCommunes = useMemo(() => getCommunesByWilayaCode(expressWilaya), [expressWilaya]);
+
+  useEffect(() => {
+    if (saasConfig.communeDropdownEnabled && wilayaCommunes.length > 0 && !customCommuneMode) {
+      if (!expressCommune || !wilayaCommunes.includes(expressCommune)) {
+        setExpressCommune(wilayaCommunes[0]);
+      }
+    }
+  }, [customCommuneMode, expressCommune, saasConfig.communeDropdownEnabled, wilayaCommunes]);
+
+  // Auto-save COD form draft to localStorage so returning customers order in 5 seconds (2FP ExpressCheckout)
   useEffect(() => {
     try {
       localStorage.setItem('2fp_cod_draft_name', expressFullName);
@@ -122,6 +157,49 @@ export function ProductDetailView({
       // ignore
     }
   }, [expressCommune, expressFullName, expressPhone, expressWilaya]);
+
+  // Real-time Abandoned COD Order Auto-Capture (2FP AbandonGuard)
+  useEffect(() => {
+    if (!saasConfig.abandonedOrdersCaptureEnabled || !product || expressSuccessOrder) return;
+    if (!isValidAlgerianPhone(expressPhone)) return;
+
+    const timer = setTimeout(() => {
+      apiFetch('/api/abandoned-orders/capture', {
+        method: 'POST',
+        body: JSON.stringify({
+          fullName: expressFullName,
+          phone: expressPhone,
+          wilayaCode: expressWilaya,
+          commune: expressCommune,
+          address: expressAddress,
+          deliveryType: expressDeliveryType,
+          productId: product.id,
+          productName: product.name,
+          productPriceDzd: product.priceDzd,
+          quantity,
+          selectedColor: [selectedColor, selectedModelVariant].filter(Boolean).join(' · '),
+          sourcePage: 'product',
+        }),
+      }).catch(() => {
+        // silent background capture
+      });
+    }, 900);
+
+    return () => clearTimeout(timer);
+  }, [
+    expressAddress,
+    expressCommune,
+    expressDeliveryType,
+    expressFullName,
+    expressPhone,
+    expressSuccessOrder,
+    expressWilaya,
+    product,
+    quantity,
+    saasConfig.abandonedOrdersCaptureEnabled,
+    selectedColor,
+    selectedModelVariant,
+  ]);
 
   // Review submission state
   const [orderRef, setOrderRef] = useState('');
@@ -144,10 +222,15 @@ export function ProductDetailView({
   }, []);
 
   useEffect(() => {
+    initStoreAdPixels(saasConfig);
+  }, [saasConfig]);
+
+  useEffect(() => {
     let active = true;
     setLoading(true);
     setError(null);
     setExpressSuccessOrder(null);
+    setUpsellAddedMessage(null);
     setSelectedCrossSellIds([]);
     apiFetch<{ product: StoreProduct; reviews: PublicReview[] }>(`/api/products/${encodeURIComponent(slug)}`)
       .then((data) => {
@@ -158,6 +241,18 @@ export function ProductDetailView({
         setQuantity(1);
         setSelectedBundle(1);
         setSelectedColor(data.product.colors?.[0]?.name || '');
+        setSelectedModelVariant('');
+        trackAdPixelEvent(
+          'ViewContent',
+          {
+            content_id: data.product.sku || String(data.product.id),
+            content_name: data.product.name,
+            value: data.product.priceDzd,
+            currency: 'DZD',
+            quantity: 1,
+          },
+          getSaasConfig(),
+        );
       })
       .catch((err) => {
         if (!active) return;
@@ -174,7 +269,7 @@ export function ProductDetailView({
   const wilayaList = bootstrap?.wilayas?.length ? bootstrap.wilayas : ALGERIA_WILAYAS;
   const activeCarriers = bootstrap?.carriers || [];
 
-  // Complementary Cross-Sell products ("Fréquemment achetés ensemble" — Shopify / YouCan / BigCommerce)
+  // Complementary Cross-Sell products ("Fréquemment achetés ensemble" — 2FP SmartCatalog)
   const crossSellCandidates = useMemo(() => {
     if (!product || !allProducts.length) return [];
     const sameCat = allProducts.filter(
@@ -197,28 +292,56 @@ export function ProductDetailView({
     [crossSellCandidates, selectedCrossSellIds],
   );
 
-  // Calculate live shipping fee for the selected wilaya & carrier
+  // Calculate live shipping fee for the selected wilaya & carrier (respecting deactivated prices & delivery modes)
   const liveShippingInfo = useMemo(() => {
     if (!product || product.productType === 'digital') {
-      return { homePriceDzd: 0, stopDeskPriceDzd: 0, feeDzd: 0, estimatedDays: 'Immédiat' };
+      return {
+        carrier: null,
+        effectiveDeliveryType: 'home' as const,
+        supportsHome: false,
+        supportsStopDesk: false,
+        homePriceDzd: 0,
+        stopDeskPriceDzd: 0,
+        feeDzd: 0,
+        pricesActive: false,
+        estimatedDays: 'Immédiat',
+      };
     }
-    const rates = (bootstrap?.shippingRates || []).filter((r) => r.wilayaCode === expressWilaya && r.isActive);
-    const chosenRate =
-      (expressCarrierId ? rates.find((r) => r.carrierId === expressCarrierId) : rates[0]) || rates[0];
-    const homePrice = chosenRate ? chosenRate.homePriceDzd : 600;
-    const stopDeskPrice = chosenRate ? chosenRate.stopDeskPriceDzd : 400;
-    const baseFee = expressDeliveryType === 'stop_desk' ? stopDeskPrice : homePrice;
+    const quote = resolveEffectiveShippingQuote({
+      carriers: activeCarriers,
+      shippingRates: bootstrap?.shippingRates || [],
+      wilayaCode: expressWilaya,
+      deliveryType: expressDeliveryType,
+      requestedCarrierId: expressCarrierId,
+      shippingPricesEnabled: saasConfig.shippingPricesEnabled,
+    });
     // Bundle 3 offers free/priority shipping discount
-    const effectiveFee = selectedBundle === 3 ? 0 : baseFee;
+    const effectiveFee = selectedBundle === 3 ? 0 : quote.feeDzd;
     return {
-      homePriceDzd: homePrice,
-      stopDeskPriceDzd: stopDeskPrice,
+      ...quote,
       feeDzd: effectiveFee,
-      estimatedDays: chosenRate?.estimatedDays || '24h-48h',
     };
-  }, [bootstrap?.shippingRates, expressCarrierId, expressDeliveryType, expressWilaya, product, selectedBundle]);
+  }, [
+    activeCarriers,
+    bootstrap?.shippingRates,
+    expressCarrierId,
+    expressDeliveryType,
+    expressWilaya,
+    product,
+    saasConfig.shippingPricesEnabled,
+    selectedBundle,
+  ]);
 
-  // Bundle discount pricing + Cross-sell add-ons (YouCan / DZBuild / Colisify / Shopify style)
+  useEffect(() => {
+    if (
+      product?.productType === 'physical' &&
+      liveShippingInfo.effectiveDeliveryType !== expressDeliveryType
+    ) {
+      setExpressDeliveryType(liveShippingInfo.effectiveDeliveryType);
+    }
+  }, [expressDeliveryType, liveShippingInfo.effectiveDeliveryType, product?.productType]);
+
+  // Bundle discount pricing + Cross-sell add-ons (2FP BoostCOD)
   const bundlePricing = useMemo(() => {
     const unit = product?.priceDzd || 0;
     const discountPct =
@@ -291,8 +414,15 @@ export function ProductDetailView({
     const addressFinal =
       expressAddress.trim() ||
       (expressDeliveryType === 'stop_desk'
-        ? `Bureau Stop Desk (${wilayaObj?.name || expressWilaya})`
+        ? `Bureau Stop Desk (${communeFinal} · ${wilayaObj?.name || expressWilaya})`
         : `${communeFinal}, ${wilayaObj?.name || ''}`);
+
+    const combinedVariantLabel = [
+      selectedColor || '',
+      selectedModelVariant ? `Modèle: ${selectedModelVariant}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
 
     setExpressSubmitting(true);
     try {
@@ -300,7 +430,7 @@ export function ProductDetailView({
         {
           productId: product.id,
           quantity,
-          selectedColor: selectedColor || undefined,
+          selectedColor: combinedVariantLabel || undefined,
           customPriceDzd: bundlePricing.effectiveUnitDzd,
         },
         ...selectedCrossSellProducts.map((cp) => ({
@@ -319,24 +449,89 @@ export function ProductDetailView({
           wilayaCode: expressWilaya,
           commune: communeFinal,
           address: addressFinal,
-          deliveryType: product.productType === 'digital' ? 'digital' : expressDeliveryType,
-          carrierId: expressCarrierId || activeCarriers[0]?.id || undefined,
+          deliveryType:
+            product.productType === 'digital' ? 'digital' : liveShippingInfo.effectiveDeliveryType,
+          carrierId: liveShippingInfo.carrier?.id || expressCarrierId || activeCarriers[0]?.id || undefined,
+          shippingPricesEnabled: saasConfig.shippingPricesEnabled,
+          antiSpamEnabled: saasConfig.antiSpamEnabled,
+          antiSpamCooldownMinutes: saasConfig.antiSpamCooldownMinutes,
+          googleSheetsWebhookUrl:
+            saasConfig.googleSheetsSyncEnabled && saasConfig.googleSheetsWebhookUrl
+              ? saasConfig.googleSheetsWebhookUrl
+              : undefined,
           source: 'web',
           customerNotes: `[Paiement à la livraison COD]${
+            combinedVariantLabel ? ` · Variante : ${combinedVariantLabel}` : ''
+          }${
             selectedBundle > 1 ? ` · Pack Offre ${selectedBundle} unités (-${bundlePricing.discountPct}%)` : ''
           }${
             selectedCrossSellProducts.length > 0
               ? ` · +${selectedCrossSellProducts.length} article(s) groupé(s) dans le même colis`
               : ''
-          }`,
+          }${expressNotes.trim() ? ` · Note client : ${expressNotes.trim()}` : ''}`,
           items: orderItems,
         }),
       });
       setExpressSuccessOrder(res.order);
+      trackAdPixelEvent(
+        'Purchase',
+        {
+          content_id: product.sku || String(product.id),
+          content_name: product.name,
+          value: res.order?.totalDzd || bundlePricing.totalDzd,
+          currency: 'DZD',
+          quantity,
+          order_reference: res.order?.reference,
+        },
+        saasConfig,
+      );
     } catch (err: any) {
       setExpressError(err?.message || 'Erreur lors de la validation de votre commande.');
     } finally {
       setExpressSubmitting(false);
+    }
+  };
+
+  const handlePostPurchaseUpsell = async (upsellProd: StoreProduct) => {
+    if (!expressSuccessOrder) return;
+    setUpsellAdding(true);
+    setExpressError(null);
+    const discountPct = Math.min(50, Math.max(5, Number(saasConfig.postPurchaseUpsellDiscountPct) || 20));
+    const discountedPrice = Math.round((upsellProd.priceDzd * (100 - discountPct)) / 100);
+    try {
+      const res = await apiFetch<{ order: any }>(
+        `/api/orders/${encodeURIComponent(expressSuccessOrder.reference)}/upsell`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            phone: expressSuccessOrder.phone,
+            productId: upsellProd.id,
+            customName: upsellProd.name,
+            customPriceDzd: discountedPrice,
+            quantity: 1,
+          }),
+        },
+      );
+      setExpressSuccessOrder(res.order);
+      setUpsellAddedMessage(
+        `${upsellProd.name} (+${formatDzd(discountedPrice)}) a été ajouté à votre colis ${res.order.reference} sans frais de livraison supplémentaires !`,
+      );
+      trackAdPixelEvent(
+        'Purchase',
+        {
+          content_id: upsellProd.sku || String(upsellProd.id),
+          content_name: `Upsell 1-Clic: ${upsellProd.name}`,
+          value: discountedPrice,
+          currency: 'DZD',
+          quantity: 1,
+          order_reference: res.order.reference,
+        },
+        saasConfig,
+      );
+    } catch (err: any) {
+      setExpressError(err?.message || 'Impossible d’ajouter cette offre à votre commande.');
+    } finally {
+      setUpsellAdding(false);
     }
   };
 
@@ -421,8 +616,15 @@ export function ProductDetailView({
     (product.productType === 'physical' && product.stockQuantity <= 0) ||
     (product.productType === 'digital' && product.digitalAvailability === 'paused');
 
-  const productWithColorTitle = selectedColor
-    ? `${product.name} (Couleur : ${selectedColor})`
+  const variantSummary = [
+    selectedColor ? `Couleur : ${selectedColor}` : '',
+    selectedModelVariant ? `Modèle : ${selectedModelVariant}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  const productWithColorTitle = variantSummary
+    ? `${product.name} (${variantSummary})`
     : product.name;
 
   const selectedWilayaObj = wilayaList.find((w) => w.code === expressWilaya);
@@ -443,8 +645,18 @@ export function ProductDetailView({
     totalDzd: bundlePricing.totalDzd,
   });
 
-  // Deterministic live viewer count for social proof (YouCan / WiziShop style)
+  // Deterministic live viewer count for social proof (2FP BoostCOD)
   const liveViewersCount = ((product.id * 7) % 14) + 6;
+  const postPurchaseCandidate = crossSellCandidates[0] || null;
+  const postPurchaseDiscountPct = Math.min(50, Math.max(5, Number(saasConfig.postPurchaseUpsellDiscountPct) || 20));
+  const ctaColorClass =
+    saasConfig.formCtaColor === 'blue'
+      ? 'bg-blue-700 hover:bg-blue-800'
+      : saasConfig.formCtaColor === 'red'
+      ? 'bg-red-600 hover:bg-red-700'
+      : saasConfig.formCtaColor === 'slate'
+      ? 'bg-slate-900 hover:bg-slate-800'
+      : 'bg-emerald-700 hover:bg-emerald-800';
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-16 pb-28">
@@ -542,7 +754,7 @@ export function ProductDetailView({
               </div>
             </div>
 
-            {/* Live Social Proof & Urgency Bar (YouCan / WiziShop / Mystoq feature) */}
+            {/* Live Social Proof & Urgency Bar (2FP BoostCOD) */}
             {saasConfig.urgencyVisitorsEnabled && !outOfStock && (
               <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl bg-amber-50/90 border border-amber-200 text-xs text-amber-950">
                 <div className="flex items-center gap-2 font-semibold">
@@ -596,47 +808,71 @@ export function ProductDetailView({
               )}
             </div>
 
-            {/* Available Colors Selector */}
-            {availableColors.length > 0 && (
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
-                <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
-                  <Palette className="w-4 h-4 text-blue-700" />
-                  <span>Couleur disponible :</span>
-                  <span className="text-blue-700">{selectedColor}</span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {availableColors.map((c) => {
-                    const active = selectedColor === c.name;
-                    return (
-                      <button
-                        key={c.name}
-                        type="button"
-                        onClick={() => {
-                          setSelectedColor(c.name);
-                          if (c.imageUrl) {
-                            const matchIdx = gallery.findIndex((g) => g.url === c.imageUrl);
-                            if (matchIdx >= 0) setActiveImageIdx(matchIdx);
-                          }
-                        }}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                          active
-                            ? 'border-blue-700 bg-blue-600 text-white shadow-sm'
-                            : 'border-slate-300 bg-white text-slate-700 hover:border-slate-400'
-                        }`}
-                      >
-                        <span
-                          className="w-3.5 h-3.5 rounded-full border border-white/60 shrink-0"
-                          style={{ backgroundColor: c.hex || '#0f172a' }}
-                        />
-                        <span>{c.name}</span>
-                      </button>
-                    );
-                  })}
-                </div>
+            {/* Available Colors & Multi-Attribute Model/Compatibility Selector (2FP SmartCatalog) */}
+            {(availableColors.length > 0 || product.productType === 'physical') && (
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                {availableColors.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
+                      <Palette className="w-4 h-4 text-blue-700" />
+                      <span>Couleur disponible :</span>
+                      <span className="text-blue-700">{selectedColor}</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {availableColors.map((c) => {
+                        const active = selectedColor === c.name;
+                        return (
+                          <button
+                            key={c.name}
+                            type="button"
+                            onClick={() => {
+                              setSelectedColor(c.name);
+                              if (c.imageUrl) {
+                                const matchIdx = gallery.findIndex((g) => g.url === c.imageUrl);
+                                if (matchIdx >= 0) setActiveImageIdx(matchIdx);
+                              }
+                            }}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                              active
+                                ? 'border-blue-700 bg-blue-600 text-white shadow-sm'
+                                : 'border-slate-300 bg-white text-slate-700 hover:border-slate-400'
+                            }`}
+                          >
+                            <span
+                              className="w-3.5 h-3.5 rounded-full border border-white/60 shrink-0"
+                              style={{ backgroundColor: c.hex || '#0f172a' }}
+                            />
+                            <span>{c.name}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {product.productType === 'physical' && (
+                  <div className="pt-1">
+                    <label className="block text-xs font-bold text-slate-800 mb-1">
+                      Modèle / Compatibilité (Optionnel) :
+                    </label>
+                    <select
+                      value={selectedModelVariant}
+                      onChange={(e) => setSelectedModelVariant(e.target.value)}
+                      className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 bg-white font-medium text-slate-800"
+                    >
+                      <option value="">Modèle Standard / Préciser à l’appel</option>
+                      {COMPATIBLE_PHONE_MODELS.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Quantity Bundles / Offres Dégressives COD (DZBuild / YouCan / Colisify / Shopify Bundles) */}
+            {/* Quantity Bundles / Offres Dégressives COD (2FP BoostCOD) */}
             {saasConfig.quantityBundlesEnabled && !outOfStock && product.stockQuantity >= 2 && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
@@ -702,7 +938,7 @@ export function ProductDetailView({
               </div>
             )}
 
-            {/* DIRECT 1-PAGE COD EXPRESS CHECKOUT FORM ON PRODUCT PAGE (DZBuild / Arkan / Mystoq / Hanoutify / YouCan) */}
+            {/* DIRECT 1-PAGE COD EXPRESS CHECKOUT FORM ON PRODUCT PAGE (2FP ExpressCheckout & FormBuilder) */}
             {saasConfig.directCodFormOnProduct && !outOfStock && (
               <div
                 ref={expressFormRef}
@@ -724,11 +960,13 @@ export function ProductDetailView({
                     </div>
                   </div>
                   <span className="px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-900 text-[11px] font-bold">
-                    Yalidine · ZR Express · Maystro
+                    {activeCarriers.length > 0
+                      ? activeCarriers.map((c) => c.name).join(' · ')
+                      : 'Livraison 58 Wilayas'}
                   </span>
                 </div>
 
-                {/* Same-Day Dispatch Timer (WiziShop / Shopify / Colisify feature) */}
+                {/* Same-Day Dispatch Timer (2FP ChronoWilaya) */}
                 {saasConfig.sameDayDispatchTimerEnabled && product.productType === 'physical' && (
                   <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-950">
                     <Clock className="w-4 h-4 text-blue-700 shrink-0" />
@@ -740,7 +978,7 @@ export function ProductDetailView({
                 )}
 
                 {expressSuccessOrder ? (
-                  <div className="p-4 rounded-xl bg-emerald-50 border-2 border-emerald-600 space-y-3">
+                  <div className="p-4 rounded-xl bg-emerald-50 border-2 border-emerald-600 space-y-4">
                     <div className="flex items-start gap-3">
                       <PackageCheck className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
                       <div>
@@ -750,10 +988,54 @@ export function ProductDetailView({
                         <p className="text-xs text-emerald-900 mt-1">
                           Notre équipe 2Frères Phone vous contacte par téléphone au{' '}
                           <strong>{expressSuccessOrder.phone}</strong> pour confirmer l’expédition vers{' '}
-                          <strong>{expressSuccessOrder.wilayaName}</strong>.
+                          <strong>
+                            {expressSuccessOrder.wilayaName} ({expressSuccessOrder.commune})
+                          </strong>{' '}
+                          — Total à la livraison :{' '}
+                          <strong className="font-mono">{formatDzd(expressSuccessOrder.totalDzd)}</strong>.
                         </p>
                       </div>
                     </div>
+
+                    {/* 1-Click Post-Purchase Upsell Offer on Thank You Card (2FP PostUpsell) */}
+                    {saasConfig.postPurchaseUpsellEnabled && postPurchaseCandidate && (
+                      <div className="p-3.5 rounded-xl bg-amber-50 border-2 border-amber-400 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-bold">
+                            OFFRE FLASH APRÈS COMMANDE (-{postPurchaseDiscountPct}% + 0 DZD LIVRAISON)
+                          </span>
+                          <span className="text-[11px] font-bold text-amber-950">Ajout en 1 clic au même colis</span>
+                        </div>
+                        {upsellAddedMessage ? (
+                          <p className="text-xs font-bold text-emerald-800 bg-emerald-100/80 border border-emerald-300 rounded-lg p-2.5">
+                            ✓ {upsellAddedMessage}
+                          </p>
+                        ) : (
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                              <p className="text-xs font-bold text-slate-900">{postPurchaseCandidate.name}</p>
+                              <p className="text-xs font-mono mt-0.5">
+                                <span className="line-through text-slate-400 mr-1.5">
+                                  {formatDzd(postPurchaseCandidate.priceDzd)}
+                                </span>
+                                <span className="font-bold text-emerald-700">
+                                  +{formatDzd(Math.round((postPurchaseCandidate.priceDzd * (100 - postPurchaseDiscountPct)) / 100))}
+                                </span>
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={upsellAdding}
+                              onClick={() => handlePostPurchaseUpsell(postPurchaseCandidate)}
+                              className="px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs"
+                            >
+                              {upsellAdding ? 'Ajout en cours...' : '+ Ajouter en 1 clic à ma commande'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div className="flex flex-wrap items-center gap-2 pt-1">
                       {onTrackOrder && (
                         <button
@@ -802,6 +1084,18 @@ export function ProductDetailView({
                             type="tel"
                             required
                             value={expressPhone}
+                            onFocus={() =>
+                              trackAdPixelEvent(
+                                'InitiateCheckout',
+                                {
+                                  content_id: product.sku || String(product.id),
+                                  content_name: product.name,
+                                  value: bundlePricing.totalDzd,
+                                  currency: 'DZD',
+                                },
+                                saasConfig,
+                              )
+                            }
                             onChange={(e) => setExpressPhone(e.target.value)}
                             placeholder="0550 12 34 56"
                             className="w-full pl-9 pr-3 py-2.5 text-sm rounded-xl border border-slate-300 bg-white font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
@@ -819,7 +1113,10 @@ export function ProductDetailView({
                             </label>
                             <select
                               value={expressWilaya}
-                              onChange={(e) => setExpressWilaya(e.target.value)}
+                              onChange={(e) => {
+                                setExpressWilaya(e.target.value);
+                                setCustomCommuneMode(false);
+                              }}
                               className="w-full px-3 py-2.5 text-sm rounded-xl border border-slate-300 bg-white font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
                             >
                               {wilayaList.map((w) => (
@@ -831,81 +1128,163 @@ export function ProductDetailView({
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-800 mb-1">
-                              Commune / Adresse *
-                            </label>
-                            <div className="relative">
-                              <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                              <input
-                                type="text"
-                                required
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="block text-xs font-bold text-slate-800">
+                                Commune ({selectedWilayaObj?.name || 'Wilaya'}) *
+                              </label>
+                              {saasConfig.communeDropdownEnabled && wilayaCommunes.length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setCustomCommuneMode((m) => !m)}
+                                  className="text-[10px] font-bold text-blue-700 hover:underline"
+                                >
+                                  {customCommuneMode ? 'Liste officielle' : 'Saisie libre'}
+                                </button>
+                              )}
+                            </div>
+                            {saasConfig.communeDropdownEnabled &&
+                            wilayaCommunes.length > 0 &&
+                            !customCommuneMode ? (
+                              <select
                                 value={expressCommune}
                                 onChange={(e) => {
-                                  setExpressCommune(e.target.value);
-                                  setExpressAddress(e.target.value);
+                                  if (e.target.value === '__custom__') {
+                                    setCustomCommuneMode(true);
+                                    setExpressCommune('');
+                                  } else {
+                                    setExpressCommune(e.target.value);
+                                  }
                                 }}
-                                placeholder="Ex: Bab Ezzouar, Centre-ville..."
-                                className="w-full pl-9 pr-3 py-2.5 text-sm rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                              />
-                            </div>
+                                className="w-full px-3 py-2.5 text-sm rounded-xl border border-slate-300 bg-white font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                              >
+                                {wilayaCommunes.map((cName) => (
+                                  <option key={cName} value={cName}>
+                                    {cName}
+                                  </option>
+                                ))}
+                                <option value="__custom__">Autre commune (saisie libre)...</option>
+                              </select>
+                            ) : (
+                              <div className="relative">
+                                <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                                <input
+                                  type="text"
+                                  required
+                                  value={expressCommune}
+                                  onChange={(e) => setExpressCommune(e.target.value)}
+                                  placeholder="Ex: Bab Ezzouar, Centre-ville..."
+                                  className="w-full pl-9 pr-3 py-2.5 text-sm rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                />
+                              </div>
+                            )}
                           </div>
                         </div>
 
-                        {/* Delivery Mode: Domicile vs Stop Desk */}
-                        <div className="grid grid-cols-2 gap-2.5">
-                          <button
-                            type="button"
-                            onClick={() => setExpressDeliveryType('home')}
-                            className={`p-3 rounded-xl border text-left transition-all ${
-                              expressDeliveryType === 'home'
-                                ? 'border-blue-700 bg-blue-600 text-white shadow-xs'
-                                : 'border-slate-300 bg-white text-slate-800 hover:border-slate-400'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between">
-                              <span className="text-xs font-bold">Livraison à Domicile</span>
-                              <Truck className="w-4 h-4" />
-                            </div>
-                            <p
-                              className={`mt-1 font-mono text-xs font-semibold ${
-                                expressDeliveryType === 'home' ? 'text-blue-100' : 'text-slate-600'
-                              }`}
-                            >
-                              {selectedBundle === 3
-                                ? 'OFFERTE (0 DZD)'
-                                : formatDzd(liveShippingInfo.homePriceDzd)}
-                            </p>
-                          </button>
+                        {saasConfig.formShowAddressField && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-800 mb-1">
+                              Adresse / Quartier ou Bureau Stop Desk (Optionnel)
+                            </label>
+                            <input
+                              type="text"
+                              value={expressAddress}
+                              onChange={(e) => setExpressAddress(e.target.value)}
+                              placeholder="Ex: Cité 1200 logements, rue principale..."
+                              className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white text-slate-900"
+                            />
+                          </div>
+                        )}
 
-                          <button
-                            type="button"
-                            onClick={() => setExpressDeliveryType('stop_desk')}
-                            className={`p-3 rounded-xl border text-left transition-all ${
-                              expressDeliveryType === 'stop_desk'
-                                ? 'border-blue-700 bg-blue-600 text-white shadow-xs'
-                                : 'border-slate-300 bg-white text-slate-800 hover:border-slate-400'
+                        {saasConfig.formShowNotesField && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-800 mb-1">
+                              Note pour le livreur (Optionnel)
+                            </label>
+                            <input
+                              type="text"
+                              value={expressNotes}
+                              onChange={(e) => setExpressNotes(e.target.value)}
+                              placeholder="Ex: Appelez-moi 15 min avant d'arriver..."
+                              className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white text-slate-900"
+                            />
+                          </div>
+                        )}
+
+                        {/* Delivery Mode: Domicile vs Stop Desk (respects carrier mode activation & price switch) */}
+                        {(liveShippingInfo.supportsHome || liveShippingInfo.supportsStopDesk) && (
+                          <div
+                            className={`grid gap-2.5 ${
+                              liveShippingInfo.supportsHome && liveShippingInfo.supportsStopDesk
+                                ? 'grid-cols-2'
+                                : 'grid-cols-1'
                             }`}
                           >
-                            <div className="flex items-center justify-between">
-                              <span className="text-xs font-bold">Bureau Stop Desk</span>
-                              <Landmark className="w-4 h-4" />
-                            </div>
-                            <p
-                              className={`mt-1 font-mono text-xs font-semibold ${
-                                expressDeliveryType === 'stop_desk' ? 'text-blue-100' : 'text-slate-600'
-                              }`}
-                            >
-                              {selectedBundle === 3
-                                ? 'OFFERTE (0 DZD)'
-                                : formatDzd(liveShippingInfo.stopDeskPriceDzd)}
-                            </p>
-                          </button>
-                        </div>
+                            {liveShippingInfo.supportsHome && (
+                              <button
+                                type="button"
+                                onClick={() => setExpressDeliveryType('home')}
+                                className={`p-3 rounded-xl border text-left transition-all ${
+                                  liveShippingInfo.effectiveDeliveryType === 'home'
+                                    ? 'border-blue-700 bg-blue-600 text-white shadow-xs'
+                                    : 'border-slate-300 bg-white text-slate-800 hover:border-slate-400'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-bold">Livraison à Domicile</span>
+                                  <Truck className="w-4 h-4" />
+                                </div>
+                                <p
+                                  className={`mt-1 font-mono text-xs font-semibold ${
+                                    liveShippingInfo.effectiveDeliveryType === 'home'
+                                      ? 'text-blue-100'
+                                      : 'text-slate-600'
+                                  }`}
+                                >
+                                  {selectedBundle === 3
+                                    ? 'OFFERTE (0 DZD)'
+                                    : !liveShippingInfo.pricesActive
+                                    ? "Tarif confirmé à l'appel"
+                                    : formatDzd(liveShippingInfo.homePriceDzd)}
+                                </p>
+                              </button>
+                            )}
+
+                            {liveShippingInfo.supportsStopDesk && (
+                              <button
+                                type="button"
+                                onClick={() => setExpressDeliveryType('stop_desk')}
+                                className={`p-3 rounded-xl border text-left transition-all ${
+                                  liveShippingInfo.effectiveDeliveryType === 'stop_desk'
+                                    ? 'border-blue-700 bg-blue-600 text-white shadow-xs'
+                                    : 'border-slate-300 bg-white text-slate-800 hover:border-slate-400'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-bold">Bureau Stop Desk</span>
+                                  <Landmark className="w-4 h-4" />
+                                </div>
+                                <p
+                                  className={`mt-1 font-mono text-xs font-semibold ${
+                                    liveShippingInfo.effectiveDeliveryType === 'stop_desk'
+                                      ? 'text-blue-100'
+                                      : 'text-slate-600'
+                                  }`}
+                                >
+                                  {selectedBundle === 3
+                                    ? 'OFFERTE (0 DZD)'
+                                    : !liveShippingInfo.pricesActive
+                                    ? "Tarif confirmé à l'appel"
+                                    : formatDzd(liveShippingInfo.stopDeskPriceDzd)}
+                                </p>
+                              </button>
+                            )}
+                          </div>
+                        )}
 
                         {activeCarriers.length > 1 && (
                           <div>
                             <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                              Société de livraison (Yalidine / ZR Express / Maystro)
+                              Société de livraison ({activeCarriers.map((c) => c.name).join(' / ')})
                             </label>
                             <select
                               value={expressCarrierId || activeCarriers[0]?.id || ''}
@@ -923,7 +1302,7 @@ export function ProductDetailView({
                       </>
                     )}
 
-                    {/* Cross-Sell / Frequently Bought Together in the same COD Parcel (Shopify / YouCan / BigCommerce) */}
+                    {/* Cross-Sell / Frequently Bought Together in the same COD Parcel (2FP SmartCatalog) */}
                     {saasConfig.crossSellBundlesEnabled && crossSellCandidates.length > 0 && (
                       <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2">
                         <div className="flex items-center justify-between">
@@ -1000,10 +1379,16 @@ export function ProductDetailView({
                       <div className="flex items-center justify-between text-slate-600">
                         <span>
                           Livraison ({selectedWilayaObj?.name || 'Wilaya'} ·{' '}
-                          {expressDeliveryType === 'stop_desk' ? 'Stop Desk' : 'Domicile'})
+                          {liveShippingInfo.effectiveDeliveryType === 'stop_desk' ? 'Stop Desk' : 'Domicile'})
                         </span>
                         <span className="font-mono font-semibold text-emerald-700">
-                          {liveShippingInfo.feeDzd === 0 ? 'GRATUITE' : formatDzd(liveShippingInfo.feeDzd)}
+                          {selectedBundle === 3
+                            ? 'OFFERTE'
+                            : !liveShippingInfo.pricesActive
+                            ? "Confirmée à l'appel"
+                            : liveShippingInfo.feeDzd === 0
+                            ? 'GRATUITE'
+                            : formatDzd(liveShippingInfo.feeDzd)}
                         </span>
                       </div>
                       <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-sm font-bold text-slate-900">
@@ -1023,13 +1408,13 @@ export function ProductDetailView({
                     <button
                       type="submit"
                       disabled={expressSubmitting}
-                      className="w-full py-3.5 px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-400 text-white text-sm font-bold shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+                      className={`w-full py-3.5 px-5 rounded-xl ${ctaColorClass} disabled:bg-slate-400 text-white text-sm font-bold shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer`}
                     >
                       <Sparkles className="w-4 h-4" />
                       <span>
                         {expressSubmitting
                           ? 'Validation de votre commande en cours...'
-                          : `COMMANDER MAINTENANT — PAIEMENT À LA LIVRAISON (${formatDzd(bundlePricing.totalDzd)})`}
+                          : `${saasConfig.formCtaText || 'COMMANDER MAINTENANT — PAIEMENT À LA LIVRAISON'} (${formatDzd(bundlePricing.totalDzd)})`}
                       </span>
                     </button>
                   </form>
@@ -1102,6 +1487,117 @@ export function ProductDetailView({
                 </a>
               </div>
             </div>
+
+            {/* Social Share Bar (WhatsApp, Facebook, Messenger, Copy Link) */}
+            {(() => {
+              const productShareUrl =
+                typeof window !== 'undefined'
+                  ? `${window.location.origin}/produit/${encodeURIComponent(product.slug)}`
+                  : `/produit/${encodeURIComponent(product.slug)}`;
+              const shareSummary = `Découvrez ${product.name} (${formatDzd(
+                bundlePricing.effectiveUnitDzd,
+              )}) chez ${settings.storeName || '2Frères Phone'} — Livraison 58 Wilayas, Paiement à la livraison : ${productShareUrl}`;
+              const whatsappShareHref = `https://wa.me/?text=${encodeURIComponent(shareSummary)}`;
+              const facebookShareHref = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(
+                productShareUrl,
+              )}&quote=${encodeURIComponent(`${product.name} — ${formatDzd(bundlePricing.effectiveUnitDzd)}`)}`;
+              const isMobileDevice =
+                typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+              const messengerShareHref = isMobileDevice
+                ? `fb-messenger://share/?link=${encodeURIComponent(productShareUrl)}`
+                : `https://www.messenger.com/`;
+
+              const handleCopyShareLink = async () => {
+                try {
+                  await navigator.clipboard.writeText(productShareUrl);
+                  setShareLinkCopied(true);
+                  setTimeout(() => setShareLinkCopied(false), 2500);
+                } catch {
+                  // ignore
+                }
+              };
+
+              return (
+                <div className="pt-4 border-t border-slate-100">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700">
+                      <Share2 className="w-3.5 h-3.5 text-blue-700" />
+                      <span>Partager cet article :</span>
+                    </span>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* WhatsApp Share */}
+                      <a
+                        href={whatsappShareHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label="Partager sur WhatsApp"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#25D366]/10 hover:bg-[#25D366] text-[#128C7E] hover:text-white border border-[#25D366]/30 text-xs font-bold transition-colors"
+                      >
+                        <MessageCircle className="w-3.5 h-3.5" />
+                        <span>WhatsApp</span>
+                      </a>
+
+                      {/* Facebook Share */}
+                      <a
+                        href={facebookShareHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label="Partager sur Facebook"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#1877F2]/10 hover:bg-[#1877F2] text-[#1877F2] hover:text-white border border-[#1877F2]/30 text-xs font-bold transition-colors"
+                      >
+                        <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M22 12c0-5.523-4.477-10-10-10S2 6.477 2 12c0 4.991 3.657 9.128 8.438 9.878v-6.987h-2.54V12h2.54V9.797c0-2.506 1.492-3.89 3.777-3.89 1.094 0 2.238.195 2.238.195v2.46h-1.26c-1.243 0-1.63.771-1.63 1.562V12h2.773l-.443 2.89h-2.33v6.988C18.343 21.128 22 16.991 22 12z" />
+                        </svg>
+                        <span>Facebook</span>
+                      </a>
+
+                      {/* Messenger Share */}
+                      <a
+                        href={messengerShareHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={() => {
+                          handleCopyShareLink();
+                        }}
+                        title="Ouvre Messenger et copie le lien du produit"
+                        aria-label="Partager sur Messenger"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0084FF]/10 hover:bg-[#0084FF] text-[#0084FF] hover:text-white border border-[#0084FF]/30 text-xs font-bold transition-colors"
+                      >
+                        <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M12 2C6.36 2 2 6.13 2 11.7c0 2.91 1.19 5.44 3.14 7.17.16.13.26.35.27.57l.05 1.78c.04.57.61.94 1.13.71l1.98-.87c.17-.08.36-.1.55-.06.88.24 1.82.37 2.88.37 5.64 0 10-4.13 10-9.7C22 6.13 17.64 2 12 2zm5.89 7.57-2.93 4.67c-.47.74-1.47.93-2.17.4l-2.34-1.75a.6.6 0 0 0-.72 0l-3.16 2.4c-.42.32-.98-.18-.69-.63l2.93-4.67c.47-.74 1.47-.93 2.17-.4l2.34 1.75a.6.6 0 0 0 .72 0l3.16-2.4c.42-.32.98.18.69.63z" />
+                        </svg>
+                        <span>Messenger</span>
+                      </a>
+
+                      {/* Copy Link Button */}
+                      <button
+                        type="button"
+                        onClick={handleCopyShareLink}
+                        aria-label="Copier le lien du produit"
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors ${
+                          shareLinkCopied
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                        }`}
+                      >
+                        {shareLinkCopied ? (
+                          <>
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Lien copié !</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copier le lien</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div className="pt-5 border-t border-slate-100 space-y-2.5 text-xs text-slate-600">
               {product.productType === 'digital' ? (
@@ -1317,7 +1813,7 @@ export function ProductDetailView({
         </div>
       </section>
 
-      {/* Sticky Bottom Conversion Bar (YouCan / Shopify / WiziShop feature) */}
+      {/* Sticky Bottom Conversion Bar (2FP BoostCOD) */}
       {saasConfig.stickyCartBarEnabled && !outOfStock && (
         <div className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur border-t border-slate-200 shadow-lg py-2.5 px-4">
           <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">

@@ -979,10 +979,10 @@ export function OkwinImageStudio({
 
       generateFromScenes(scenes);
       setStatusMsg(
-        `Okwin AI + Gemini a généré 4 nouvelles images selon votre prompt : « ${customPrompt.trim()} »`,
+        `2FP Lumina Studio IA a généré 4 nouvelles images selon votre prompt : « ${customPrompt.trim()} »`,
       );
     } catch (err: any) {
-      setStatusMsg(err?.message || 'Erreur lors de la génération Okwin AI.');
+      setStatusMsg(err?.message || 'Erreur lors de la génération 2FP Lumina Studio IA.');
     } finally {
       setGenerating(false);
     }
@@ -992,7 +992,7 @@ export function OkwinImageStudio({
   const uploadDataUrlToMedia = async (dataUrl: string, index: number): Promise<string> => {
     const response = await fetch(dataUrl);
     const blob = await response.blob();
-    const file = new File([blob], `okwin-studio-${Date.now()}-${index}.jpg`, {
+    const file = new File([blob], `2fp-lumina-studio-${Date.now()}-${index}.jpg`, {
       type: 'image/jpeg',
     });
     const fd = new FormData();
@@ -1012,10 +1012,10 @@ export function OkwinImageStudio({
       const url = await uploadDataUrlToMedia(dataUrl, idx);
       if (asPrimary && onSetPrimaryImage) {
         onSetPrimaryImage(url);
-        setStatusMsg('Photo Okwin Studio définie comme PHOTO PRINCIPALE du produit !');
+        setStatusMsg('Photo 2FP Lumina Studio définie comme PHOTO PRINCIPALE du produit !');
       } else {
         onAddGeneratedImages([url]);
-        setStatusMsg('Image Okwin Studio ajoutée avec succès à la galerie du produit !');
+        setStatusMsg('Image 2FP Lumina Studio ajoutée avec succès à la galerie du produit !');
       }
     } catch (err: any) {
       setStatusMsg(err?.message || 'Impossible d’enregistrer l’image générée.');
@@ -1036,7 +1036,7 @@ export function OkwinImageStudio({
       }
       onAddGeneratedImages(uploadedUrls);
       setStatusMsg(
-        `${uploadedUrls.length} nouvelles images Okwin Studio ajoutées à votre produit / landing page !`,
+        `${uploadedUrls.length} nouvelles images 2FP Lumina Studio ajoutées à votre produit / landing page !`,
       );
     } catch (err: any) {
       setStatusMsg(err?.message || 'Erreur lors de l’ajout des images.');
@@ -1054,7 +1054,7 @@ export function OkwinImageStudio({
           <div className="flex flex-wrap items-center gap-2">
             <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 text-[11px] font-bold uppercase tracking-wider">
               <Sparkles className="w-3.5 h-3.5" />
-              <span>Okwin AI Photo Studio Pro · Fonds Blancs &amp; Fonds Complexes</span>
+              <span>2FP Lumina Studio IA Pro · Fonds Blancs &amp; Fonds Complexes</span>
             </div>
             {bgDiagnosis && (
               <span
@@ -1114,7 +1114,7 @@ export function OkwinImageStudio({
         <div className="py-8 text-center space-y-3 border border-dashed border-slate-700 rounded-xl bg-slate-900/50">
           <p className="text-xs text-slate-300">
             Téléversez d’abord une première photo de votre produit pour activer le studio
-            d’arrière-plan <strong>Okwin AI Pro</strong>.
+            d’arrière-plan <strong>2FP Lumina Studio IA Pro</strong>.
           </p>
           {onSourceImageUploaded && (
             <label className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold cursor-pointer">
@@ -1171,7 +1171,7 @@ export function OkwinImageStudio({
           {/* 2. Custom Prompt Input */}
           <div className="space-y-2">
             <label className="block text-xs font-bold text-slate-200">
-              2. Ou créez votre propre prompt personnalisé (Okwin + Gemini AI) :
+              2. Ou créez votre propre prompt personnalisé (2FP Lumina Studio IA) :
             </label>
             <div className="flex flex-col sm:flex-row gap-2">
               <input
@@ -1507,7 +1507,7 @@ export function OkwinImageStudio({
                           disabled={savingUrls}
                           onClick={() => handleSaveOneVariation(item.dataUrl, idx, true)}
                           className="w-full py-1.5 px-2 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-[11px] font-bold flex items-center justify-center gap-1 shadow-2xs"
-                          title="Définir immédiatement cette image Okwin comme Photo Principale du produit"
+                          title="Définir immédiatement cette image 2FP Lumina Studio comme Photo Principale du produit"
                         >
                           <Star className="w-3 h-3 fill-slate-950" />
                           <span>Choisir Principale</span>

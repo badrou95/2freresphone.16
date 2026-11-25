@@ -173,6 +173,10 @@ export const orders = pgTable('orders', {
   hasPhysicalItems: boolean('has_physical_items').notNull().default(true),
   stockDeducted: boolean('stock_deducted').notNull().default(false),
   source: text('source').notNull().default('web'), // 'web' | 'whatsapp' | 'admin'
+  callStatus: text('call_status').notNull().default('non_appele'),
+  // non_appele | appel_1_sans_reponse | appel_2_eteint | appel_3_reporte | confirme_tel | annule_client | faux_numero
+  callAttempts: integer('call_attempts').notNull().default(0),
+  callNotes: text('call_notes'),
   customerNotes: text('customer_notes'),
   adminNotes: text('admin_notes'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -407,6 +411,27 @@ export const landingPages = pgTable('landing_pages', {
   isPublished: boolean('is_published').notNull().default(true),
   viewsCount: integer('views_count').notNull().default(0),
   ordersCount: integer('orders_count').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const abandonedOrders = pgTable('abandoned_orders', {
+  id: serial('id').primaryKey(),
+  fullName: text('full_name').notNull().default('Client'),
+  phone: text('phone').notNull(),
+  wilayaCode: text('wilaya_code').notNull().default('16'),
+  wilayaName: text('wilaya_name').notNull().default('Alger'),
+  commune: text('commune').notNull().default(''),
+  deliveryType: text('delivery_type').notNull().default('home'),
+  productId: integer('product_id').references(() => products.id, { onDelete: 'set null' }),
+  productName: text('product_name').notNull().default('Article en cours'),
+  productPriceDzd: integer('product_price_dzd').notNull().default(0),
+  quantity: integer('quantity').notNull().default(1),
+  selectedColor: text('selected_color'),
+  sourcePage: text('source_page').notNull().default('product'), // 'product' | 'checkout' | 'landing_page'
+  status: text('status').notNull().default('en_attente'), // 'en_attente' | 'relance_whatsapp' | 'recuperee' | 'ignoree'
+  recoveredOrderId: integer('recovered_order_id'),
+  notes: text('notes').notNull().default(''),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

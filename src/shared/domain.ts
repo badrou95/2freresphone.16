@@ -35,6 +35,58 @@ export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   retournee: 'Retournée',
 };
 
+export type CallStatus =
+  | 'non_appele'
+  | 'appel_1_sans_reponse'
+  | 'appel_2_eteint'
+  | 'appel_3_reporte'
+  | 'confirme_tel'
+  | 'annule_client'
+  | 'faux_numero';
+
+export const CALL_STATUSES: {
+  value: CallStatus;
+  label: string;
+  badgeClass: string;
+}[] = [
+  { value: 'non_appele', label: 'Non appelé', badgeClass: 'bg-slate-100 text-slate-700 border-slate-200' },
+  { value: 'appel_1_sans_reponse', label: 'Appel 1 · Pas de réponse', badgeClass: 'bg-amber-50 text-amber-800 border-amber-200' },
+  { value: 'appel_2_eteint', label: 'Appel 2 · Téléphone éteint', badgeClass: 'bg-orange-50 text-orange-800 border-orange-200' },
+  { value: 'appel_3_reporte', label: 'Appel 3 · Reporté / Rappeler', badgeClass: 'bg-blue-50 text-blue-800 border-blue-200' },
+  { value: 'confirme_tel', label: 'Confirmé par téléphone', badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200' },
+  { value: 'annule_client', label: 'Annulé par le client', badgeClass: 'bg-slate-200 text-slate-800 border-slate-300' },
+  { value: 'faux_numero', label: 'Faux numéro / Bloquable', badgeClass: 'bg-red-50 text-red-800 border-red-200' },
+];
+
+export type AdminTeamRole = 'super_admin' | 'admin' | 'confirmateur' | 'preparateur';
+
+export const ADMIN_TEAM_ROLES: {
+  value: AdminTeamRole;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: 'super_admin',
+    label: 'Gérant Principal (Super Admin)',
+    description: 'Accès total : Commandes, Stock .MDF/.IDF, Comptabilité, Prix d’achat et Paramètres.',
+  },
+  {
+    value: 'admin',
+    label: 'Co-Gérant (Admin)',
+    description: 'Accès complet à la gestion de la boutique, produits, commandes et logistique.',
+  },
+  {
+    value: 'confirmateur',
+    label: 'Confirmateur (Centre d’Appel)',
+    description: 'Accès limité aux Commandes, Panier Abandonnés & Clients (sans prix d’achat ni compta).',
+  },
+  {
+    value: 'preparateur',
+    label: 'Magasinier / Préparateur Colis',
+    description: 'Accès limité aux Commandes à expédier, Imprimante Thermique & Transporteurs.',
+  },
+];
+
 export const CATEGORY_GROUPS = [
   { value: 'accessories', label: 'Accessoires téléphoniques', labelAr: 'إكسسوارات الهواتف' },
   { value: 'gaming', label: 'Jeux vidéo', labelAr: 'ألعاب الفيديو' },
@@ -45,18 +97,15 @@ export type StoreCurrency = 'DZD' | 'EUR' | 'USD';
 export type StoreLang = 'fr' | 'ar';
 
 export function getActiveStoreCurrency(): StoreCurrency {
-  if (typeof window === 'undefined') return 'DZD';
-  const saved = (window as any).__2fp_currency || localStorage.getItem('2fp_store_currency');
-  if (saved === 'EUR' || saved === 'USD') return saved;
   return 'DZD';
 }
 
-export function setActiveStoreCurrency(currency: StoreCurrency) {
+export function setActiveStoreCurrency(_currency: StoreCurrency) {
   if (typeof window === 'undefined') return;
-  (window as any).__2fp_currency = currency;
+  (window as any).__2fp_currency = 'DZD';
   try {
-    localStorage.setItem('2fp_store_currency', currency);
-    window.dispatchEvent(new CustomEvent('2fp-currency-change', { detail: currency }));
+    localStorage.setItem('2fp_store_currency', 'DZD');
+    window.dispatchEvent(new CustomEvent('2fp-currency-change', { detail: 'DZD' }));
   } catch {
     // ignore
   }
@@ -98,9 +147,37 @@ export interface SaasFeaturesConfig {
   bilingualArFrEnabled: boolean;
   multiCurrencyEnabled: boolean;
   antiReturnScoreEnabled: boolean;
+  shippingPricesEnabled: boolean;
   announcementBarEnabled: boolean;
   announcementTextFr: string;
   announcementTextAr: string;
+  // 1. Abandoned COD Orders Auto-Capture
+  abandonedOrdersCaptureEnabled: boolean;
+  // 2. 1-Click Post-Purchase Upsell on Thank You screen
+  postPurchaseUpsellEnabled: boolean;
+  postPurchaseUpsellDiscountPct: number;
+  // 3. Ad Pixels & Conversion Tracking (Meta, TikTok, Snapchat, Google)
+  metaPixelId: string;
+  tiktokPixelId: string;
+  snapchatPixelId: string;
+  googleTagId: string;
+  // 4 & 9. 2FP Form Builder & Official 1,541 Communes Selector
+  communeDropdownEnabled: boolean;
+  formShowAddressField: boolean;
+  formShowNotesField: boolean;
+  formSingleFullNameField: boolean;
+  formCtaText: string;
+  formCtaColor: 'emerald' | 'blue' | 'red' | 'amber' | 'slate';
+  // 5. Anti-Spam & Duplicate Order Limiter
+  antiSpamEnabled: boolean;
+  antiSpamCooldownMinutes: number;
+  // 6. Google Sheets Live Webhook Sync
+  googleSheetsWebhookUrl: string;
+  googleSheetsSyncEnabled: boolean;
+  // 7. Storefront Theme Color & Admin Sound Alert & Mobile PWA Banner
+  storeThemeColor: 'blue' | 'emerald' | 'red' | 'amber' | 'slate';
+  adminOrderSoundEnabled: boolean;
+  pwaInstallBannerEnabled: boolean;
 }
 
 export const DEFAULT_SAAS_CONFIG: SaasFeaturesConfig = {
@@ -113,13 +190,34 @@ export const DEFAULT_SAAS_CONFIG: SaasFeaturesConfig = {
   whatsappFloatingButtonEnabled: true,
   liveOrderToastEnabled: true,
   bilingualArFrEnabled: true,
-  multiCurrencyEnabled: true,
+  multiCurrencyEnabled: false,
   antiReturnScoreEnabled: true,
+  shippingPricesEnabled: true,
   announcementBarEnabled: true,
   announcementTextFr:
-    'Livraison Express 58 Wilayas (Yalidine · ZR Express · Maystro) · Paiement 100% à la livraison (COD) après vérification du colis',
+    'Livraison Express 58 Wilayas · Paiement 100% à la livraison (COD) après vérification du colis',
   announcementTextAr:
-    'توصيل سريع لـ 58 ولاية (ياليدين · ZR Express · مايسترو) · الدفع 100% عند الاستلام بعد فحص الطرد',
+    'توصيل سريع لـ 58 ولاية · الدفع 100% عند الاستلام بعد فحص الطرد',
+  abandonedOrdersCaptureEnabled: true,
+  postPurchaseUpsellEnabled: true,
+  postPurchaseUpsellDiscountPct: 20,
+  metaPixelId: '',
+  tiktokPixelId: '',
+  snapchatPixelId: '',
+  googleTagId: '',
+  communeDropdownEnabled: true,
+  formShowAddressField: true,
+  formShowNotesField: true,
+  formSingleFullNameField: true,
+  formCtaText: 'COMMANDER MAINTENANT — PAIEMENT À LA LIVRAISON',
+  formCtaColor: 'emerald',
+  antiSpamEnabled: true,
+  antiSpamCooldownMinutes: 10,
+  googleSheetsWebhookUrl: '',
+  googleSheetsSyncEnabled: false,
+  storeThemeColor: 'blue',
+  adminOrderSoundEnabled: true,
+  pwaInstallBannerEnabled: true,
 };
 
 export function getSaasConfig(): SaasFeaturesConfig {
@@ -127,14 +225,14 @@ export function getSaasConfig(): SaasFeaturesConfig {
   try {
     const raw = localStorage.getItem('2fp_saas_features_config');
     if (!raw) return DEFAULT_SAAS_CONFIG;
-    return { ...DEFAULT_SAAS_CONFIG, ...JSON.parse(raw) };
+    return { ...DEFAULT_SAAS_CONFIG, ...JSON.parse(raw), multiCurrencyEnabled: false };
   } catch {
     return DEFAULT_SAAS_CONFIG;
   }
 }
 
 export function saveSaasConfig(next: Partial<SaasFeaturesConfig>): SaasFeaturesConfig {
-  const merged = { ...getSaasConfig(), ...next };
+  const merged = { ...getSaasConfig(), ...next, multiCurrencyEnabled: false };
   if (typeof window !== 'undefined') {
     try {
       localStorage.setItem('2fp_saas_features_config', JSON.stringify(merged));
@@ -146,19 +244,8 @@ export function saveSaasConfig(next: Partial<SaasFeaturesConfig>): SaasFeaturesC
   return merged;
 }
 
-export function formatDzd(amount: number, forceDzd = false): string {
+export function formatDzd(amount: number, _forceDzd = false): string {
   const safe = Number.isFinite(amount) ? Math.round(amount) : 0;
-  if (!forceDzd && typeof window !== 'undefined') {
-    const cur = getActiveStoreCurrency();
-    if (cur === 'EUR') {
-      const eur = (safe / 245).toFixed(2);
-      return `${eur} €`;
-    }
-    if (cur === 'USD') {
-      const usd = (safe / 225).toFixed(2);
-      return `${usd} $`;
-    }
-  }
   return `${safe.toLocaleString('fr-DZ')} DZD`;
 }
 
@@ -426,4 +513,106 @@ export function calculateFinancialSummary(items: StockFinancialItem[]): Financia
     roiPercent,
   };
 }
+
+export interface CarrierConfigItem {
+  id: number;
+  name: string;
+  code?: string;
+  isActive?: boolean;
+  supportsHome: boolean;
+  supportsStopDesk: boolean;
+}
+
+export interface ShippingRateItem {
+  id?: number;
+  carrierId: number;
+  wilayaCode: string;
+  homePriceDzd: number;
+  stopDeskPriceDzd: number;
+  estimatedDays?: string;
+  isActive: boolean;
+}
+
+export function resolveEffectiveShippingQuote(params: {
+  carriers: CarrierConfigItem[];
+  shippingRates: ShippingRateItem[];
+  wilayaCode: string;
+  deliveryType: 'home' | 'stop_desk';
+  requestedCarrierId?: number | null;
+  shippingPricesEnabled?: boolean;
+}): {
+  carrier: CarrierConfigItem | null;
+  effectiveDeliveryType: 'home' | 'stop_desk';
+  supportsHome: boolean;
+  supportsStopDesk: boolean;
+  homePriceDzd: number;
+  stopDeskPriceDzd: number;
+  feeDzd: number;
+  pricesActive: boolean;
+  estimatedDays: string;
+} {
+  const pricesEnabled = params.shippingPricesEnabled !== false;
+  const activeCarriers = (params.carriers || []).filter((c) => c.isActive !== false);
+  const chosenCarrier =
+    (params.requestedCarrierId
+      ? activeCarriers.find((c) => c.id === Number(params.requestedCarrierId))
+      : null) ||
+    activeCarriers[0] ||
+    null;
+
+  const supportsHome = chosenCarrier ? chosenCarrier.supportsHome !== false : true;
+  const supportsStopDesk = chosenCarrier ? chosenCarrier.supportsStopDesk !== false : true;
+
+  let effectiveDeliveryType: 'home' | 'stop_desk' = params.deliveryType;
+  if (effectiveDeliveryType === 'stop_desk' && !supportsStopDesk && supportsHome) {
+    effectiveDeliveryType = 'home';
+  } else if (effectiveDeliveryType === 'home' && !supportsHome && supportsStopDesk) {
+    effectiveDeliveryType = 'stop_desk';
+  }
+
+  const normWilaya = String(params.wilayaCode || '16').padStart(2, '0');
+  const activeCarrierIds = new Set(activeCarriers.map((c) => c.id));
+
+  const matchingRates = (params.shippingRates || []).filter(
+    (r) =>
+      r.wilayaCode === normWilaya &&
+      r.isActive !== false &&
+      activeCarrierIds.has(r.carrierId) &&
+      (!chosenCarrier || r.carrierId === chosenCarrier.id),
+  );
+
+  const chosenRate = matchingRates[0] || null;
+  if (!pricesEnabled || !chosenCarrier || !chosenRate || (!supportsHome && !supportsStopDesk)) {
+    return {
+      carrier: chosenCarrier,
+      effectiveDeliveryType,
+      supportsHome,
+      supportsStopDesk,
+      homePriceDzd: 0,
+      stopDeskPriceDzd: 0,
+      feeDzd: 0,
+      pricesActive: false,
+      estimatedDays: chosenRate?.estimatedDays || '24h-48h',
+    };
+  }
+
+  const homePriceDzd = supportsHome ? Math.max(0, Number(chosenRate.homePriceDzd) || 0) : 0;
+  const stopDeskPriceDzd = supportsStopDesk
+    ? Math.max(0, Number(chosenRate.stopDeskPriceDzd) || 0)
+    : 0;
+  const feeDzd = effectiveDeliveryType === 'stop_desk' ? stopDeskPriceDzd : homePriceDzd;
+
+  return {
+    carrier: chosenCarrier,
+    effectiveDeliveryType,
+    supportsHome,
+    supportsStopDesk,
+    homePriceDzd,
+    stopDeskPriceDzd,
+    feeDzd,
+    pricesActive: feeDzd > 0 || homePriceDzd > 0 || stopDeskPriceDzd > 0,
+    estimatedDays: chosenRate.estimatedDays || '24h-48h',
+  };
+}
+
 

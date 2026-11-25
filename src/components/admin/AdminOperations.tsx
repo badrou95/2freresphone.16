@@ -40,6 +40,40 @@ export function AdminSales({
   onOpenMdfImport?: () => void;
 }) {
   const [search, setSearch] = useState('');
+  const [adSpendDzd, setAdSpendDzd] = useState<number>(() => {
+    try {
+      return Number(localStorage.getItem('2fp_ad_spend_dzd')) || 0;
+    } catch {
+      return 0;
+    }
+  });
+  const [returnFeePerParcelDzd, setReturnFeePerParcelDzd] = useState<number>(() => {
+    try {
+      return Number(localStorage.getItem('2fp_return_fee_dzd')) || 350;
+    } catch {
+      return 350;
+    }
+  });
+
+  const handleAdSpendChange = (val: number) => {
+    const clean = Math.max(0, Math.round(val || 0));
+    setAdSpendDzd(clean);
+    try {
+      localStorage.setItem('2fp_ad_spend_dzd', String(clean));
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleReturnFeeChange = (val: number) => {
+    const clean = Math.max(0, Math.round(val || 0));
+    setReturnFeePerParcelDzd(clean);
+    try {
+      localStorage.setItem('2fp_return_fee_dzd', String(clean));
+    } catch {
+      // ignore
+    }
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -113,6 +147,41 @@ export function AdminSales({
       { collected: 0, items: 0, costOfGoods: 0, shipping: 0, margin: 0 },
     );
   }, [filtered]);
+
+  // COD Profitability & ROAS / CPA metrics
+  const codRoasMetrics = useMemo(() => {
+    const totalOrdersCount = orders.length;
+    const deliveredOrdersCount = orders.filter((o) => o.status === 'livree').length;
+    const returnedOrdersCount = orders.filter((o) => o.status === 'retournee').length;
+    const deliveryRatePct =
+      deliveredOrdersCount + returnedOrdersCount > 0
+        ? Math.round((deliveredOrdersCount / (deliveredOrdersCount + returnedOrdersCount)) * 100)
+        : 100;
+    const totalReturnCostDzd = returnedOrdersCount * returnFeePerParcelDzd;
+    const grossMarginSalesDzd = totals.margin + comptaTotals.salesMarginDzd;
+    const netCodProfitDzd = grossMarginSalesDzd - adSpendDzd - totalReturnCostDzd;
+    const cpaPerOrderDzd =
+      totalOrdersCount > 0 ? Math.round(adSpendDzd / totalOrdersCount) : 0;
+    const cpaPerDeliveredDzd =
+      deliveredOrdersCount > 0 ? Math.round(adSpendDzd / deliveredOrdersCount) : 0;
+    const roas =
+      adSpendDzd > 0
+        ? ((totals.collected + comptaTotals.salesDzd) / adSpendDzd).toFixed(2)
+        : '—';
+
+    return {
+      totalOrdersCount,
+      deliveredOrdersCount,
+      returnedOrdersCount,
+      deliveryRatePct,
+      totalReturnCostDzd,
+      grossMarginSalesDzd,
+      netCodProfitDzd,
+      cpaPerOrderDzd,
+      cpaPerDeliveredDzd,
+      roas,
+    };
+  }, [orders, totals, comptaTotals, adSpendDzd, returnFeePerParcelDzd]);
 
   const handleExport = () => {
     const csv = toCsv(
@@ -227,6 +296,99 @@ export function AdminSales({
           <p className="text-[11px] text-emerald-800 mt-0.5">
             Ventes : +{formatDzd(totals.margin + comptaTotals.salesMarginDzd)} · Stock : +{formatDzd(displayStockMarginDzd)}
           </p>
+        </div>
+      </div>
+
+      {/* Calculateur de Rentabilité Net COD & Coût Publicitaire (ROAS / CPA / Frais Retours) */}
+      <div className="bg-white border-2 border-slate-900 rounded-xl p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+          <div>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-700">
+              2FP ProfitLab · Calculateur de Rentabilité Net COD &amp; Coût Publicitaire (ROAS / CPA)
+            </span>
+            <h3 className="font-display font-bold text-base text-slate-900">
+              Bénéfice Net Réel après Prix d’Achat, Budget Ads (Facebook/TikTok) et Frais de Retours Colis
+            </h3>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Budget Publicitaire Ads (DZD)
+              </label>
+              <input
+                type="number"
+                min={0}
+                step={500}
+                value={adSpendDzd}
+                onChange={(e) => handleAdSpendChange(Number(e.target.value))}
+                placeholder="Ex. 15000"
+                className="w-36 px-3 py-1.5 text-xs font-mono font-bold rounded-lg border border-slate-300"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Coût moyen par colis retourné (DZD)
+              </label>
+              <input
+                type="number"
+                min={0}
+                step={50}
+                value={returnFeePerParcelDzd}
+                onChange={(e) => handleReturnFeeChange(Number(e.target.value))}
+                placeholder="Ex. 350"
+                className="w-36 px-3 py-1.5 text-xs font-mono font-bold rounded-lg border border-slate-300"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+            <p className="text-[11px] font-semibold text-slate-500">CPA (Coût / Commande livrée)</p>
+            <p className="font-mono font-bold text-lg text-slate-900 mt-0.5 tabular-nums">
+              {formatDzd(codRoasMetrics.cpaPerDeliveredDzd)}
+            </p>
+            <p className="text-[11px] text-slate-400">
+              Coût / commande reçue : {formatDzd(codRoasMetrics.cpaPerOrderDzd)}
+            </p>
+          </div>
+          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+            <p className="text-[11px] font-semibold text-slate-500">ROAS &amp; Taux de livraison</p>
+            <p className="font-mono font-bold text-lg text-blue-700 mt-0.5 tabular-nums">
+              {codRoasMetrics.roas}x · {codRoasMetrics.deliveryRatePct}%
+            </p>
+            <p className="text-[11px] text-slate-400">
+              {codRoasMetrics.deliveredOrdersCount} livrée(s) / {codRoasMetrics.returnedOrdersCount} retour(s)
+            </p>
+          </div>
+          <div className="p-3.5 rounded-xl bg-red-50/70 border border-red-200">
+            <p className="text-[11px] font-semibold text-red-800">Pertes Frais Retours + Ads</p>
+            <p className="font-mono font-bold text-lg text-red-600 mt-0.5 tabular-nums">
+              -{formatDzd(codRoasMetrics.totalReturnCostDzd + adSpendDzd)}
+            </p>
+            <p className="text-[11px] text-red-700">
+              Retours : {formatDzd(codRoasMetrics.totalReturnCostDzd)} · Ads : {formatDzd(adSpendDzd)}
+            </p>
+          </div>
+          <div
+            className={`p-3.5 rounded-xl border ${
+              codRoasMetrics.netCodProfitDzd >= 0
+                ? 'bg-emerald-50 border-emerald-300'
+                : 'bg-red-50 border-red-300'
+            }`}
+          >
+            <p className="text-[11px] font-bold text-slate-900">Bénéfice Net COD Réel (Poche)</p>
+            <p
+              className={`font-mono font-bold text-lg mt-0.5 tabular-nums ${
+                codRoasMetrics.netCodProfitDzd >= 0 ? 'text-emerald-700' : 'text-red-700'
+              }`}
+            >
+              {formatDzd(codRoasMetrics.netCodProfitDzd)}
+            </p>
+            <p className="text-[11px] text-slate-600">
+              Marge ventes ({formatDzd(codRoasMetrics.grossMarginSalesDzd)}) - Ads - Retours
+            </p>
+          </div>
         </div>
       </div>
 

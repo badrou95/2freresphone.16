@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { ArrowRight, CheckCircle2, Search, ShieldCheck, Truck } from 'lucide-react';
 import { StoreBootstrap, StoreProduct } from '../../types';
+import { PaginationBar } from '../PaginationBar';
 import { ProductCard } from './ProductCard';
 import { ProductCardSkeleton } from './StoreSkeletons';
 
@@ -19,9 +20,31 @@ interface StoreHomeProps {
 
 export function StoreHome({ bootstrap, products, loading = false, navigate, onAddToCart }: StoreHomeProps) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [homePage, setHomePage] = useState<number>(1);
+  const [homePageSize, setHomePageSize] = useState<number>(6);
+  const showcaseRef = useRef<HTMLElement | null>(null);
 
-  const featuredProducts = products.filter((p) => p.isFeatured).slice(0, 6);
-  const displayProducts = featuredProducts.length > 0 ? featuredProducts : products.slice(0, 6);
+  // Order featured products first, followed by the rest of the catalog, paginated at 6 (or 5..10) per page
+  const orderedProducts = useMemo(() => {
+    const featured = products.filter((p) => p.isFeatured);
+    const others = products.filter((p) => !p.isFeatured);
+    return [...featured, ...others];
+  }, [products]);
+
+  const totalHomePages = Math.max(1, Math.ceil(orderedProducts.length / homePageSize));
+  const safeHomePage = Math.min(homePage, totalHomePages);
+
+  const displayProducts = useMemo(() => {
+    const start = (safeHomePage - 1) * homePageSize;
+    return orderedProducts.slice(start, start + homePageSize);
+  }, [orderedProducts, safeHomePage, homePageSize]);
+
+  const handleHomePageChange = (nextPage: number) => {
+    setHomePage(nextPage);
+    if (showcaseRef.current) {
+      showcaseRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -186,15 +209,15 @@ export function StoreHome({ bootstrap, products, loading = false, navigate, onAd
         </div>
       </section>
 
-      {/* Section 3: Featured Products Grid */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-end justify-between gap-4 mb-6">
+      {/* Section 3: Paginated Products Grid (6 to 10 products per page, no infinite scroll) */}
+      <section ref={showcaseRef} className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
+        <div className="flex items-end justify-between gap-4">
           <div>
             <h2 className="font-display font-bold text-2xl text-slate-900 tracking-tight">
-              Sélection du moment
+              Sélection &amp; Catalogue
             </h2>
             <p className="text-sm text-slate-600 mt-1">
-              Prix transparents en Dinars algériens (DZD) et avis d’acheteurs vérifiés.
+              Prix transparents en Dinars algériens (DZD) · Navigation par pages ({homePageSize} produits par page).
             </p>
           </div>
           <a
@@ -205,7 +228,7 @@ export function StoreHome({ bootstrap, products, loading = false, navigate, onAd
             }}
             className="text-sm font-semibold text-blue-700 hover:text-blue-800 inline-flex items-center gap-1 whitespace-nowrap"
           >
-            <span>Explorer le catalogue</span>
+            <span>Filtres avancés du catalogue</span>
             <ArrowRight className="w-4 h-4" />
           </a>
         </div>
@@ -222,6 +245,20 @@ export function StoreHome({ bootstrap, products, loading = false, navigate, onAd
                 />
               ))}
         </div>
+
+        {!loading && orderedProducts.length > 0 && (
+          <PaginationBar
+            currentPage={safeHomePage}
+            totalItems={orderedProducts.length}
+            pageSize={homePageSize}
+            pageSizeOptions={[5, 6, 9, 10]}
+            onPageChange={handleHomePageChange}
+            onPageSizeChange={(size) => {
+              setHomePageSize(size);
+              setHomePage(1);
+            }}
+          />
+        )}
       </section>
     </div>
   );

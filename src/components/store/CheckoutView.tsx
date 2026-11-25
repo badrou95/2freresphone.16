@@ -1,9 +1,17 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, Copy, MessageCircle, ShieldCheck, Tag, Truck } from 'lucide-react';
 import { useCart } from '../../context/CartContext';
 import { apiFetch } from '../../lib/api';
+import { initStoreAdPixels, trackAdPixelEvent } from '../../lib/pixels';
+import { getCommunesByWilayaCode } from '../../shared/algeria';
 import { StoreBootstrap } from '../../types';
-import { buildWhatsAppOrderUrl, formatDzd } from '../../shared/domain';
+import {
+  buildWhatsAppOrderUrl,
+  formatDzd,
+  getSaasConfig,
+  isValidAlgerianPhone,
+  resolveEffectiveShippingQuote,
+} from '../../shared/domain';
 import { ProductImage } from '../ProductImage';
 
 interface CheckoutViewProps {
@@ -33,6 +41,7 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
   const [phone, setPhone] = useState('');
   const [wilayaCode, setWilayaCode] = useState('16');
   const [commune, setCommune] = useState('');
+  const [customCommuneMode, setCustomCommuneMode] = useState(false);
   const [address, setAddress] = useState('');
   const [deliveryType, setDeliveryType] = useState<'home' | 'stop_desk'>('home');
   const [carrierId, setCarrierId] = useState<number | ''>(bootstrap.carriers[0]?.id ?? '');
@@ -46,6 +55,101 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [confirmedOrder, setConfirmedOrder] = useState<any | null>(null);
   const [copiedRef, setCopiedRef] = useState(false);
+  const [upsellAdding, setUpsellAdding] = useState(false);
+  const [upsellAddedMessage, setUpsellAddedMessage] = useState<string | null>(null);
+
+  const [saasConfig, setSaasConfig] = useState(() => getSaasConfig());
+
+  useEffect(() => {
+    const onCfg = () => setSaasConfig(getSaasConfig());
+    window.addEventListener('2fp-saas-config-change', onCfg);
+    return () => window.removeEventListener('2fp-saas-config-change', onCfg);
+  }, []);
+
+  useEffect(() => {
+    initStoreAdPixels(saasConfig);
+    if (items.length > 0) {
+      trackAdPixelEvent(
+        'InitiateCheckout',
+        {
+          content_id: items.map((i) => String(i.productId)).join(','),
+          content_name: items.map((i) => i.name).join(' + '),
+          value: subtotalDzd,
+          currency: 'DZD',
+          quantity: items.reduce((a, i) => a + i.quantity, 0),
+        },
+        saasConfig,
+      );
+    }
+  }, [items, saasConfig, subtotalDzd]);
+
+  const wilayaCommunes = useMemo(() => getCommunesByWilayaCode(wilayaCode), [wilayaCode]);
+
+  useEffect(() => {
+    if (saasConfig.communeDropdownEnabled && wilayaCommunes.length > 0 && !customCommuneMode) {
+      if (!commune || !wilayaCommunes.includes(commune)) {
+        setCommune(wilayaCommunes[0]);
+      }
+    }
+  }, [commune, customCommuneMode, saasConfig.communeDropdownEnabled, wilayaCommunes]);
+
+  // Real-time Abandoned COD Order Auto-Capture (2FP AbandonGuard)
+  useEffect(() => {
+    if (!saasConfig.abandonedOrdersCaptureEnabled || items.length === 0 || confirmedOrder) return;
+    if (!isValidAlgerianPhone(phone)) return;
+
+    const timer = setTimeout(() => {
+      const firstItem = items[0];
+      apiFetch('/api/abandoned-orders/capture', {
+        method: 'POST',
+        body: JSON.stringify({
+          fullName: `${firstName} ${lastName}`.trim(),
+          phone,
+          wilayaCode,
+          commune,
+          address,
+          deliveryType,
+          productId: firstItem?.productId || null,
+          productName: items.map((i) => `${i.name} x${i.quantity}`).join(' + '),
+          productPriceDzd: subtotalDzd,
+          quantity: items.reduce((acc, i) => acc + i.quantity, 0),
+          selectedColor: firstItem?.selectedColor || '',
+          sourcePage: 'checkout',
+        }),
+      }).catch(() => {
+        // silent background capture
+      });
+    }, 900);
+
+    return () => clearTimeout(timer);
+  }, [
+    address,
+    commune,
+    confirmedOrder,
+    deliveryType,
+    firstName,
+    items,
+    lastName,
+    phone,
+    saasConfig.abandonedOrdersCaptureEnabled,
+    subtotalDzd,
+    wilayaCode,
+  ]);
+
+  const localCarrierQuote = resolveEffectiveShippingQuote({
+    carriers: bootstrap.carriers,
+    shippingRates: bootstrap.shippingRates,
+    wilayaCode,
+    deliveryType,
+    requestedCarrierId: carrierId || null,
+    shippingPricesEnabled: saasConfig.shippingPricesEnabled,
+  });
+
+  useEffect(() => {
+    if (hasPhysical && localCarrierQuote.effectiveDeliveryType !== deliveryType) {
+      setDeliveryType(localCarrierQuote.effectiveDeliveryType);
+    }
+  }, [deliveryType, hasPhysical, localCarrierQuote.effectiveDeliveryType]);
 
   useEffect(() => {
     if (items.length === 0) {
@@ -59,9 +163,10 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
       body: JSON.stringify({
         items: items.map((i) => ({ productId: i.productId, quantity: i.quantity })),
         wilayaCode,
-        deliveryType: hasPhysical ? deliveryType : 'digital',
+        deliveryType: hasPhysical ? localCarrierQuote.effectiveDeliveryType : 'digital',
         carrierId: carrierId || undefined,
         promoCode: appliedPromo || undefined,
+        shippingPricesEnabled: saasConfig.shippingPricesEnabled,
       }),
     })
       .then((res) => {
@@ -73,7 +178,15 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
     return () => {
       active = false;
     };
-  }, [items, wilayaCode, deliveryType, carrierId, appliedPromo, hasPhysical]);
+  }, [
+    items,
+    wilayaCode,
+    localCarrierQuote.effectiveDeliveryType,
+    carrierId,
+    appliedPromo,
+    hasPhysical,
+    saasConfig.shippingPricesEnabled,
+  ]);
 
   const selectedWilayaName =
     bootstrap.wilayas.find((w) => w.code === wilayaCode)?.name || 'Alger';
@@ -83,18 +196,31 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
     setSubmitError(null);
     setSubmitting(true);
     try {
+      const effectiveAddress =
+        address.trim() ||
+        (localCarrierQuote.effectiveDeliveryType === 'stop_desk'
+          ? `Bureau Stop Desk (${commune || selectedWilayaName})`
+          : `${commune || 'Centre'}, ${selectedWilayaName}`);
+
       const res = await apiFetch<{ order: any; items: any[] }>('/api/orders', {
         method: 'POST',
         body: JSON.stringify({
           firstName,
-          lastName,
+          lastName: lastName.trim() || firstName.trim() || 'Algérie',
           phone,
           wilayaCode,
-          commune,
-          address,
-          deliveryType: hasPhysical ? deliveryType : 'digital',
+          commune: commune || selectedWilayaName,
+          address: effectiveAddress,
+          deliveryType: hasPhysical ? localCarrierQuote.effectiveDeliveryType : 'digital',
           carrierId: carrierId || undefined,
           promoCode: appliedPromo || undefined,
+          shippingPricesEnabled: saasConfig.shippingPricesEnabled,
+          antiSpamEnabled: saasConfig.antiSpamEnabled,
+          antiSpamCooldownMinutes: saasConfig.antiSpamCooldownMinutes,
+          googleSheetsWebhookUrl:
+            saasConfig.googleSheetsSyncEnabled && saasConfig.googleSheetsWebhookUrl
+              ? saasConfig.googleSheetsWebhookUrl
+              : undefined,
           customerNotes,
           source,
           items: items.map((i) => ({
@@ -105,11 +231,61 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
         }),
       });
       setConfirmedOrder({ ...res.order, orderedItems: res.items });
+      trackAdPixelEvent(
+        'Purchase',
+        {
+          content_id: res.order?.reference,
+          content_name: items.map((i) => i.name).join(' + '),
+          value: res.order?.totalDzd || subtotalDzd,
+          currency: 'DZD',
+          quantity: items.reduce((a, i) => a + i.quantity, 0),
+          order_reference: res.order?.reference,
+        },
+        saasConfig,
+      );
       clearCart();
     } catch (err: any) {
       setSubmitError(err.message || 'Impossible de valider votre commande.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleAddPostPurchaseUpsell = async () => {
+    if (!confirmedOrder) return;
+    setUpsellAdding(true);
+    setSubmitError(null);
+    const discountPct = Math.min(50, Math.max(5, Number(saasConfig.postPurchaseUpsellDiscountPct) || 20));
+    const upsellPrice = Math.round((2500 * (100 - discountPct)) / 100);
+    const upsellName = 'Pack Protection 2FP (Câble Charge Rapide + Verre Trempé 9H)';
+    try {
+      const res = await apiFetch<{ order: any }>(
+        `/api/orders/${encodeURIComponent(confirmedOrder.reference)}/upsell`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            phone: confirmedOrder.phone,
+            customName: upsellName,
+            customPriceDzd: upsellPrice,
+            quantity: 1,
+          }),
+        },
+      );
+      setConfirmedOrder((prev: any) => ({
+        ...prev,
+        ...res.order,
+        orderedItems: [
+          ...(prev.orderedItems || []),
+          { name: `${upsellName} (Offre Post-Achat 1-Clic)`, quantity: 1, unitPriceDzd: upsellPrice },
+        ],
+      }));
+      setUpsellAddedMessage(
+        `${upsellName} (+${formatDzd(upsellPrice)}) ajouté à votre colis sans frais de port supplémentaires !`,
+      );
+    } catch (err: any) {
+      setSubmitError(err?.message || 'Impossible d’ajouter cette offre.');
+    } finally {
+      setUpsellAdding(false);
     }
   };
 
@@ -124,8 +300,8 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
       commune: confirmedOrder.commune,
       address: confirmedOrder.address,
       deliveryType: confirmedOrder.deliveryType,
-      items: confirmedOrder.orderedItems.map((i: any) => ({
-        name: i.name,
+      items: (confirmedOrder.orderedItems || []).map((i: any) => ({
+        name: i.name || i.productName,
         quantity: i.quantity,
         unitPriceDzd: i.unitPriceDzd,
       })),
@@ -134,6 +310,8 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
       shippingFeeDzd: confirmedOrder.shippingFeeDzd,
       totalDzd: confirmedOrder.totalDzd,
     });
+    const discountPct = Math.min(50, Math.max(5, Number(saasConfig.postPurchaseUpsellDiscountPct) || 20));
+    const upsellPrice = Math.round((2500 * (100 - discountPct)) / 100);
 
     return (
       <div className="max-w-2xl mx-auto px-4 py-14">
@@ -170,6 +348,43 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
               <span>{copiedRef ? 'Copiée' : 'Copier'}</span>
             </button>
           </div>
+
+          {/* 1-Click Post-Purchase Upsell Offer (2FP PostUpsell) */}
+          {saasConfig.postPurchaseUpsellEnabled && (
+            <div className="p-4 rounded-xl bg-amber-50 border-2 border-amber-400 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-bold">
+                  OFFRE POST-ACHAT EN 1 CLIC (-{discountPct}% + 0 DZD LIVRAISON)
+                </span>
+                <span className="text-xs font-bold text-amber-950">Même colis COD</span>
+              </div>
+              {upsellAddedMessage ? (
+                <p className="text-xs font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 rounded-lg p-2.5">
+                  ✓ {upsellAddedMessage}
+                </p>
+              ) : (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">
+                      Pack Protection 2FP (Câble Charge Rapide + Verre Trempé 9H)
+                    </p>
+                    <p className="text-xs font-mono mt-0.5">
+                      <span className="line-through text-slate-400 mr-1.5">{formatDzd(2500)}</span>
+                      <span className="font-bold text-emerald-700">+{formatDzd(upsellPrice)}</span>
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={upsellAdding}
+                    onClick={handleAddPostPurchaseUpsell}
+                    className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold"
+                  >
+                    {upsellAdding ? 'Ajout...' : '+ Ajouter en 1 clic à mon colis'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="space-y-2 text-sm border-t border-slate-100 pt-4">
             <div className="flex justify-between">
@@ -350,31 +565,64 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label htmlFor="chk-commune" className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Commune *
-              </label>
-              <input
-                id="chk-commune"
-                required
-                value={commune}
-                onChange={(e) => setCommune(e.target.value)}
-                placeholder="Ex. Bab Ezzouar"
-                className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600"
-              />
+              <div className="flex items-center justify-between mb-1.5">
+                <label htmlFor="chk-commune" className="block text-xs font-semibold text-slate-700">
+                  Commune *
+                </label>
+                {saasConfig.communeDropdownEnabled && wilayaCommunes.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomCommuneMode((m) => !m);
+                      if (!customCommuneMode) setCommune('');
+                      else setCommune(wilayaCommunes[0] || '');
+                    }}
+                    className="text-[11px] font-semibold text-blue-700 hover:underline"
+                  >
+                    {customCommuneMode ? 'Liste officielle' : 'Autre commune'}
+                  </button>
+                )}
+              </div>
+              {saasConfig.communeDropdownEnabled && !customCommuneMode && wilayaCommunes.length > 0 ? (
+                <select
+                  id="chk-commune"
+                  required
+                  value={commune}
+                  onChange={(e) => setCommune(e.target.value)}
+                  className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                >
+                  {wilayaCommunes.map((cName) => (
+                    <option key={cName} value={cName}>
+                      {cName}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id="chk-commune"
+                  required
+                  value={commune}
+                  onChange={(e) => setCommune(e.target.value)}
+                  placeholder="Ex. Bab Ezzouar"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              )}
             </div>
-            <div>
-              <label htmlFor="chk-address" className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Adresse complète *
-              </label>
-              <input
-                id="chk-address"
-                required
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                placeholder="Cité, rue, bâtiment..."
-                className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600"
-              />
-            </div>
+            {saasConfig.formShowAddressField && (
+              <div>
+                <label htmlFor="chk-address" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Adresse complète *
+                </label>
+                <input
+                  id="chk-address"
+                  required
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  placeholder="Cité, rue, bâtiment..."
+                  className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+            )}
           </div>
 
           {hasPhysical ? (
@@ -408,43 +656,55 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setDeliveryType('home')}
-                  className={`p-4 rounded-xl border text-left transition-colors ${
-                    deliveryType === 'home'
-                      ? 'border-blue-700 bg-blue-50/50'
-                      : 'border-slate-200 hover:border-slate-300'
+              {(localCarrierQuote.supportsHome || localCarrierQuote.supportsStopDesk) && (
+                <div
+                  className={`grid grid-cols-1 gap-3 ${
+                    localCarrierQuote.supportsHome && localCarrierQuote.supportsStopDesk
+                      ? 'sm:grid-cols-2'
+                      : ''
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-slate-900">À domicile</span>
-                    <Truck className="w-4 h-4 text-blue-700" />
-                  </div>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Livraison directe à votre adresse ({selectedWilayaName})
-                  </p>
-                </button>
+                  {localCarrierQuote.supportsHome && (
+                    <button
+                      type="button"
+                      onClick={() => setDeliveryType('home')}
+                      className={`p-4 rounded-xl border text-left transition-colors ${
+                        localCarrierQuote.effectiveDeliveryType === 'home'
+                          ? 'border-blue-700 bg-blue-50/50'
+                          : 'border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-slate-900">À domicile</span>
+                        <Truck className="w-4 h-4 text-blue-700" />
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Livraison directe à votre adresse ({selectedWilayaName})
+                      </p>
+                    </button>
+                  )}
 
-                <button
-                  type="button"
-                  onClick={() => setDeliveryType('stop_desk')}
-                  className={`p-4 rounded-xl border text-left transition-colors ${
-                    deliveryType === 'stop_desk'
-                      ? 'border-blue-700 bg-blue-50/50'
-                      : 'border-slate-200 hover:border-slate-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-slate-900">STOP DESK</span>
-                    <Truck className="w-4 h-4 text-slate-600" />
-                  </div>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Retrait au bureau transporteur de la wilaya (tarif réduit)
-                  </p>
-                </button>
-              </div>
+                  {localCarrierQuote.supportsStopDesk && (
+                    <button
+                      type="button"
+                      onClick={() => setDeliveryType('stop_desk')}
+                      className={`p-4 rounded-xl border text-left transition-colors ${
+                        localCarrierQuote.effectiveDeliveryType === 'stop_desk'
+                          ? 'border-blue-700 bg-blue-50/50'
+                          : 'border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-slate-900">STOP DESK</span>
+                        <Truck className="w-4 h-4 text-slate-600" />
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Retrait au bureau transporteur de la wilaya
+                      </p>
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex items-start gap-3 text-sm text-slate-700">
@@ -462,19 +722,21 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
             </div>
           )}
 
-          <div>
-            <label htmlFor="chk-notes" className="block text-xs font-semibold text-slate-700 mb-1.5">
-              Remarque pour la commande (optionnel)
-            </label>
-            <textarea
-              id="chk-notes"
-              rows={2}
-              value={customerNotes}
-              onChange={(e) => setCustomerNotes(e.target.value)}
-              placeholder="Modèle exact de téléphone, couleur souhaitée, créneau d'appel..."
-              className="w-full px-3.5 py-2 text-sm rounded-lg border border-slate-300"
-            />
-          </div>
+          {saasConfig.formShowNotesField && (
+            <div>
+              <label htmlFor="chk-notes" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                Remarque pour la commande (optionnel)
+              </label>
+              <textarea
+                id="chk-notes"
+                rows={2}
+                value={customerNotes}
+                onChange={(e) => setCustomerNotes(e.target.value)}
+                placeholder="Modèle exact de téléphone, couleur souhaitée, créneau d'appel..."
+                className="w-full px-3.5 py-2 text-sm rounded-lg border border-slate-300"
+              />
+            </div>
+          )}
 
           {(quoteError || submitError) && (
             <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
@@ -486,11 +748,21 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
             <button
               type="submit"
               disabled={submitting}
-              className="w-full py-3.5 px-5 rounded-lg bg-blue-700 hover:bg-blue-800 disabled:bg-slate-400 text-white text-sm font-semibold transition-colors"
+              className={`w-full py-3.5 px-5 rounded-lg disabled:bg-slate-400 text-white text-sm font-semibold transition-colors ${
+                saasConfig.formCtaColor === 'emerald'
+                  ? 'bg-emerald-600 hover:bg-emerald-700'
+                  : saasConfig.formCtaColor === 'red'
+                  ? 'bg-red-600 hover:bg-red-700'
+                  : saasConfig.formCtaColor === 'amber'
+                  ? 'bg-amber-600 hover:bg-amber-700'
+                  : saasConfig.formCtaColor === 'slate'
+                  ? 'bg-slate-900 hover:bg-slate-800'
+                  : 'bg-blue-700 hover:bg-blue-800'
+              }`}
             >
               {submitting
                 ? 'Validation en cours...'
-                : `Confirmer la commande — ${formatDzd(effectiveTotal)}`}
+                : `${saasConfig.formCtaText || 'Confirmer la commande'} — ${formatDzd(effectiveTotal)}`}
             </button>
 
             <a
@@ -580,9 +852,18 @@ export function CheckoutView({ bootstrap, onTrackOrder, onContinueShopping }: Ch
             <div className="flex justify-between text-slate-600">
               <span>
                 Frais de livraison ({selectedWilayaName} ·{' '}
-                {!hasPhysical ? 'Numérique' : deliveryType === 'stop_desk' ? 'STOP DESK' : 'À domicile'})
+                {!hasPhysical
+                  ? 'Numérique'
+                  : localCarrierQuote.effectiveDeliveryType === 'stop_desk'
+                  ? 'STOP DESK'
+                  : 'À domicile'}
+                )
               </span>
-              <span className="font-mono tabular-nums">{formatDzd(effectiveShipping)}</span>
+              <span className="font-mono tabular-nums">
+                {!localCarrierQuote.pricesActive && hasPhysical
+                  ? "Confirmés à l'appel"
+                  : formatDzd(effectiveShipping)}
+              </span>
             </div>
             <div className="flex justify-between text-base font-bold text-slate-900 pt-3 border-t border-slate-200">
               <span>Total à payer</span>

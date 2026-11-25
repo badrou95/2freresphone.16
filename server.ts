@@ -8,6 +8,7 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { GoogleGenAI, Type } from '@google/genai';
 import { db, hasDatabaseConfig } from './src/db/index.ts';
 import {
+  abandonedOrders,
   accountingEntries,
   adminUsers,
   carriers,
@@ -127,11 +128,13 @@ export function createApp() {
         .from(carriers)
         .where(eq(carriers.isActive, true))
         .orderBy(asc(carriers.id));
-      const rates = await db
+      const activeCarrierIds = new Set(activeCarriers.map((c) => c.id));
+      const allActiveRates = await db
         .select()
         .from(shippingRates)
         .where(eq(shippingRates.isActive, true))
         .orderBy(asc(shippingRates.wilayaCode));
+      const rates = allActiveRates.filter((r) => activeCarrierIds.has(r.carrierId));
 
       // Sanitize public settings (never expose adminAlertEmail publicly)
       const publicSettings = settingsRow
@@ -470,7 +473,7 @@ export function createApp() {
   // Checkout calculation (real DB shipping rates & promo validation)
   app.post('/api/checkout/calculate', async (req, res) => {
     try {
-      const { items, wilayaCode, deliveryType, carrierId, promoCode } = req.body || {};
+      const { items, wilayaCode, deliveryType, carrierId, promoCode, shippingPricesEnabled } = req.body || {};
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ error: 'Votre panier est vide.' });
       }
@@ -500,32 +503,75 @@ export function createApp() {
       let shippingFeeDzd = 0;
       let resolvedCarrierId: number | null = null;
       let resolvedCarrierName: string | null = null;
-      let estimatedDays: string | null = null;
+      let estimatedDays: string | null = '24h-48h';
 
       if (hasPhysical && wilayaCode) {
         const normWilaya = String(wilayaCode).padStart(2, '0');
-        let rateRows = await db
+        const activeCarriersList = await db
           .select()
-          .from(shippingRates)
-          .where(and(eq(shippingRates.wilayaCode, normWilaya), eq(shippingRates.isActive, true)));
+          .from(carriers)
+          .where(eq(carriers.isActive, true))
+          .orderBy(asc(carriers.id));
+        const activeCarrierMap = new Map(activeCarriersList.map((c) => [c.id, c]));
 
-        if (carrierId) {
+        let rateRows = (
+          await db
+            .select()
+            .from(shippingRates)
+            .where(and(eq(shippingRates.wilayaCode, normWilaya), eq(shippingRates.isActive, true)))
+        ).filter((r) => activeCarrierMap.has(r.carrierId));
+
+        if (carrierId && activeCarrierMap.has(Number(carrierId))) {
           const matching = rateRows.filter((r) => r.carrierId === Number(carrierId));
-          if (matching.length > 0) rateRows = matching;
+          if (matching.length > 0) {
+            rateRows = matching;
+          } else {
+            rateRows = [];
+          }
         }
 
-        const chosenRate = rateRows[0];
-        if (!chosenRate) {
-          return res.status(400).json({
-            error: 'Aucun tarif de livraison configuré pour cette wilaya. Contactez-nous sur WhatsApp.',
-          });
+        const chosenCarrier =
+          (carrierId && activeCarrierMap.get(Number(carrierId))) ||
+          (rateRows[0] && activeCarrierMap.get(rateRows[0].carrierId)) ||
+          activeCarriersList[0] ||
+          null;
+
+        if (chosenCarrier) {
+          resolvedCarrierId = chosenCarrier.id;
+          resolvedCarrierName = chosenCarrier.name;
         }
-        const [carrier] = await db.select().from(carriers).where(eq(carriers.id, chosenRate.carrierId));
-        resolvedCarrierId = chosenRate.carrierId;
-        resolvedCarrierName = carrier?.name || 'Transporteur configuré';
-        estimatedDays = chosenRate.estimatedDays;
-        shippingFeeDzd =
-          deliveryType === 'stop_desk' ? chosenRate.stopDeskPriceDzd : chosenRate.homePriceDzd;
+
+        const chosenRate =
+          (chosenCarrier ? rateRows.find((r) => r.carrierId === chosenCarrier.id) : rateRows[0]) || null;
+
+        if (chosenRate && shippingPricesEnabled !== false && chosenCarrier) {
+          estimatedDays = chosenRate.estimatedDays || '24h-48h';
+          const canHome = chosenCarrier.supportsHome !== false;
+          const canStopDesk = chosenCarrier.supportsStopDesk !== false;
+          const effectiveMode =
+            deliveryType === 'stop_desk'
+              ? canStopDesk
+                ? 'stop_desk'
+                : canHome
+                ? 'home'
+                : null
+              : canHome
+              ? 'home'
+              : canStopDesk
+              ? 'stop_desk'
+              : null;
+
+          if (effectiveMode === 'stop_desk') {
+            shippingFeeDzd = Math.max(0, chosenRate.stopDeskPriceDzd || 0);
+          } else if (effectiveMode === 'home') {
+            shippingFeeDzd = Math.max(0, chosenRate.homePriceDzd || 0);
+          } else {
+            shippingFeeDzd = 0;
+          }
+        } else {
+          // Carrier prices disabled or no active rate for this wilaya: 0 DZD (never block checkout)
+          shippingFeeDzd = 0;
+        }
       }
 
       let discountDzd = 0;
@@ -629,15 +675,36 @@ export function createApp() {
         return res.status(400).json({ error: 'Wilaya sélectionnée invalide.' });
       }
 
-      // Check customer blocklist
+      // Check customer blocklist (Anti-Fraud / Blacklist)
       const [existingCustomer] = await db
         .select()
         .from(customers)
         .where(eq(customers.phone, normalizedPhone));
       if (existingCustomer?.isBlocked) {
         return res.status(403).json({
-          error: 'Impossible de finaliser cette commande en ligne. Veuillez contacter la boutique par WhatsApp.',
+          error: 'Ce numéro de téléphone est restreint sur notre boutique en ligne. Veuillez contacter la boutique par WhatsApp.',
         });
+      }
+
+      // Check Anti-Spam duplicate order cooldown for the same phone number
+      const antiSpamEnabled = req.body?.antiSpamEnabled !== false;
+      const cooldownMins = Math.min(180, Math.max(0, Number(req.body?.antiSpamCooldownMinutes ?? 5)));
+      if (antiSpamEnabled && cooldownMins > 0) {
+        const recentOrdersForPhone = await db
+          .select()
+          .from(orders)
+          .where(eq(orders.phone, normalizedPhone))
+          .orderBy(desc(orders.createdAt))
+          .limit(1);
+        const latestOrd = recentOrdersForPhone[0];
+        if (latestOrd && latestOrd.status !== 'annulee') {
+          const elapsedMs = Date.now() - new Date(latestOrd.createdAt).getTime();
+          if (elapsedMs >= 0 && elapsedMs < cooldownMins * 60 * 1000) {
+            return res.status(429).json({
+              error: `Votre commande (${latestOrd.reference}) a déjà été enregistrée il y a quelques instants. Notre équipe vous appelle très vite pour confirmer !`,
+            });
+          }
+        }
       }
 
       // Validate items & stock (also supports standalone landing page items via landingPageId)
@@ -736,23 +803,58 @@ export function createApp() {
       let resolvedCarrierName: string | null = null;
 
       if (hasPhysical) {
-        let rateRows = await db
+        const shippingPricesEnabled = req.body?.shippingPricesEnabled !== false;
+        const activeCarriersList = await db
           .select()
-          .from(shippingRates)
-          .where(and(eq(shippingRates.wilayaCode, normWilaya), eq(shippingRates.isActive, true)));
-        if (carrierId) {
+          .from(carriers)
+          .where(eq(carriers.isActive, true))
+          .orderBy(asc(carriers.id));
+        const activeCarrierMap = new Map(activeCarriersList.map((c) => [c.id, c]));
+
+        let rateRows = (
+          await db
+            .select()
+            .from(shippingRates)
+            .where(and(eq(shippingRates.wilayaCode, normWilaya), eq(shippingRates.isActive, true)))
+        ).filter((r) => activeCarrierMap.has(r.carrierId));
+
+        if (carrierId && activeCarrierMap.has(Number(carrierId))) {
           const matching = rateRows.filter((r) => r.carrierId === Number(carrierId));
-          if (matching.length > 0) rateRows = matching;
+          rateRows = matching;
         }
-        const rate = rateRows[0];
-        if (!rate) {
-          return res.status(400).json({ error: 'Tarif de livraison non configuré pour cette wilaya.' });
+
+        const chosenCarrier =
+          (carrierId && activeCarrierMap.get(Number(carrierId))) ||
+          (rateRows[0] && activeCarrierMap.get(rateRows[0].carrierId)) ||
+          activeCarriersList[0] ||
+          null;
+
+        if (chosenCarrier) {
+          resolvedCarrierId = chosenCarrier.id;
+          resolvedCarrierName = chosenCarrier.name;
+          if (effectiveDeliveryType === 'stop_desk' && !chosenCarrier.supportsStopDesk && chosenCarrier.supportsHome) {
+            effectiveDeliveryType = 'home';
+          } else if (effectiveDeliveryType === 'home' && !chosenCarrier.supportsHome && chosenCarrier.supportsStopDesk) {
+            effectiveDeliveryType = 'stop_desk';
+          }
         }
-        const [carrier] = await db.select().from(carriers).where(eq(carriers.id, rate.carrierId));
-        resolvedCarrierId = rate.carrierId;
-        resolvedCarrierName = carrier?.name || 'Transporteur configuré';
-        shippingFeeDzd =
-          effectiveDeliveryType === 'stop_desk' ? rate.stopDeskPriceDzd : rate.homePriceDzd;
+
+        const rate =
+          (chosenCarrier ? rateRows.find((r) => r.carrierId === chosenCarrier.id) : rateRows[0]) || null;
+
+        if (rate && shippingPricesEnabled && chosenCarrier) {
+          const modeEnabled =
+            effectiveDeliveryType === 'stop_desk'
+              ? chosenCarrier.supportsStopDesk !== false
+              : chosenCarrier.supportsHome !== false;
+          shippingFeeDzd = modeEnabled
+            ? effectiveDeliveryType === 'stop_desk'
+              ? Math.max(0, rate.stopDeskPriceDzd || 0)
+              : Math.max(0, rate.homePriceDzd || 0)
+            : 0;
+        } else {
+          shippingFeeDzd = 0;
+        }
       }
 
       // Apply promo code if valid
@@ -894,6 +996,46 @@ export function createApp() {
         changedBy: 'client',
       });
 
+      // Mark any pending abandoned orders for this phone number as recovered
+      try {
+        await db
+          .update(abandonedOrders)
+          .set({
+            status: 'recuperee',
+            recoveredOrderId: createdOrder.id,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(abandonedOrders.phone, normalizedPhone), eq(abandonedOrders.status, 'en_attente')));
+      } catch {
+        // non-blocking
+      }
+
+      // Optional live Google Sheets Webhook sync if provided by client config
+      const googleSheetsWebhookUrl = String(req.body?.googleSheetsWebhookUrl || '').trim();
+      if (googleSheetsWebhookUrl && /^https:\/\/script\.google\.com\/|^https:\/\//i.test(googleSheetsWebhookUrl)) {
+        fetch(googleSheetsWebhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            event: 'new_order',
+            store: '2Frères Phone',
+            reference: createdOrder.reference,
+            createdAt: createdOrder.createdAt,
+            customerName: `${createdOrder.firstName} ${createdOrder.lastName}`,
+            phone: createdOrder.phone,
+            wilaya: `${createdOrder.wilayaCode} - ${createdOrder.wilayaName}`,
+            commune: createdOrder.commune,
+            address: createdOrder.address,
+            deliveryType: createdOrder.deliveryType,
+            items: resolvedItems.map((i) => `${i.productName} x${i.quantity}`).join(' | '),
+            subtotalDzd: createdOrder.subtotalDzd,
+            shippingFeeDzd: createdOrder.shippingFeeDzd,
+            totalDzd: createdOrder.totalDzd,
+            status: createdOrder.status,
+          }),
+        }).catch(() => {});
+      }
+
       return res.status(201).json({
         order: createdOrder,
         items: resolvedItems.map((i) => ({
@@ -911,7 +1053,275 @@ export function createApp() {
     }
   });
 
+  // Public 1-Click Post-Purchase Upsell: Add discounted item to existing order without re-entering customer details
+  app.post('/api/orders/:reference/upsell', async (req, res) => {
+    try {
+      const ref = String(req.params.reference || '').trim().toUpperCase();
+      const { phone, productId, discountPct } = req.body || {};
+      if (!ref || !productId) {
+        return res.status(400).json({ error: 'Référence et article upsell requis.' });
+      }
+      const [existingOrder] = await db.select().from(orders).where(eq(orders.reference, ref));
+      if (!existingOrder) {
+        return res.status(404).json({ error: 'Commande introuvable.' });
+      }
+      if (phone && normalizeAlgerianPhone(String(phone)) !== normalizeAlgerianPhone(existingOrder.phone)) {
+        return res.status(403).json({ error: 'Vérification du numéro de téléphone échouée.' });
+      }
+      if (existingOrder.status !== 'nouvelle' && existingOrder.status !== 'a_confirmer') {
+        return res.status(400).json({ error: 'Cette commande est déjà en cours d’expédition.' });
+      }
+
+      const [prod] = await db.select().from(products).where(eq(products.id, Number(productId)));
+      if (!prod || !prod.isActive || (prod.productType === 'physical' && prod.stockQuantity < 1)) {
+        return res.status(400).json({ error: 'Cet article complémentaire n’est plus en stock.' });
+      }
+
+      const safeDiscountPct = Math.min(50, Math.max(0, Number(discountPct) || 20));
+      const upsellUnitPriceDzd = Math.round((prod.priceDzd * (100 - safeDiscountPct)) / 100);
+
+      await db.insert(orderItems).values({
+        orderId: existingOrder.id,
+        productId: prod.id,
+        productName: `${prod.name} [Offre Upsell Post-Achat -${safeDiscountPct}%]`,
+        productSku: prod.sku,
+        productType: prod.productType,
+        unitPriceDzd: upsellUnitPriceDzd,
+        costPriceDzd: prod.costPriceDzd,
+        quantity: 1,
+        lineTotalDzd: upsellUnitPriceDzd,
+      });
+
+      const nextSubtotal = existingOrder.subtotalDzd + upsellUnitPriceDzd;
+      const nextTotal = Math.max(0, nextSubtotal - existingOrder.discountDzd + existingOrder.shippingFeeDzd);
+
+      const [updatedOrder] = await db
+        .update(orders)
+        .set({
+          subtotalDzd: nextSubtotal,
+          totalDzd: nextTotal,
+          customerNotes: `${existingOrder.customerNotes || ''} · [+1 Upsell Post-Achat : ${prod.name}]`.trim(),
+          updatedAt: new Date(),
+        })
+        .where(eq(orders.id, existingOrder.id))
+        .returning();
+
+      const updatedItems = await db.select().from(orderItems).where(eq(orderItems.orderId, existingOrder.id));
+
+      return res.json({
+        order: updatedOrder,
+        items: updatedItems.map((i) => ({
+          productId: i.productId,
+          name: i.productName,
+          quantity: i.quantity,
+          unitPriceDzd: i.unitPriceDzd,
+          lineTotalDzd: i.lineTotalDzd,
+          productType: i.productType,
+        })),
+        addedProduct: prod.name,
+        addedPriceDzd: upsellUnitPriceDzd,
+      });
+    } catch (error) {
+      console.error('Post-purchase upsell error:', error);
+      return res.status(500).json({ error: 'Impossible d’ajouter l’offre à votre commande.' });
+    }
+  });
+
+  // Public Abandoned Order Auto-Capture: Saves draft order as soon as customer types a valid Algerian phone number
+  app.post('/api/abandoned-orders/capture', async (req, res) => {
+    try {
+      const b = req.body || {};
+      const rawPhone = String(b.phone || '').trim();
+      if (!isValidAlgerianPhone(rawPhone)) {
+        return res.json({ captured: false });
+      }
+      const normalizedPhone = normalizeAlgerianPhone(rawPhone);
+      const normWilaya = String(b.wilayaCode || '16').padStart(2, '0');
+      const wilaya = getWilayaByCode(normWilaya);
+
+      // Check if an existing pending abandoned order exists for this phone within the last 24h
+      const existingPending = await db
+        .select()
+        .from(abandonedOrders)
+        .where(and(eq(abandonedOrders.phone, normalizedPhone), eq(abandonedOrders.status, 'en_attente')))
+        .orderBy(desc(abandonedOrders.updatedAt))
+        .limit(1);
+
+      if (existingPending[0]) {
+        const [updated] = await db
+          .update(abandonedOrders)
+          .set({
+            fullName: String(b.fullName || existingPending[0].fullName || 'Client').trim() || 'Client',
+            wilayaCode: wilaya?.code || '16',
+            wilayaName: wilaya?.name || 'Alger',
+            commune: String(b.commune || existingPending[0].commune || '').trim(),
+            deliveryType: b.deliveryType === 'stop_desk' ? 'stop_desk' : 'home',
+            productId: b.productId ? Number(b.productId) : existingPending[0].productId,
+            productName: String(b.productName || existingPending[0].productName || 'Article').trim(),
+            productPriceDzd: Math.max(0, Math.round(Number(b.productPriceDzd) || existingPending[0].productPriceDzd)),
+            quantity: Math.max(1, Math.round(Number(b.quantity) || 1)),
+            selectedColor: b.selectedColor ? String(b.selectedColor).trim() : existingPending[0].selectedColor,
+            sourcePage: String(b.sourcePage || existingPending[0].sourcePage || 'product'),
+            updatedAt: new Date(),
+          })
+          .where(eq(abandonedOrders.id, existingPending[0].id))
+          .returning();
+        return res.json({ captured: true, abandonedOrder: updated });
+      }
+
+      const [created] = await db
+        .insert(abandonedOrders)
+        .values({
+          fullName: String(b.fullName || 'Client').trim() || 'Client',
+          phone: normalizedPhone,
+          wilayaCode: wilaya?.code || '16',
+          wilayaName: wilaya?.name || 'Alger',
+          commune: String(b.commune || '').trim(),
+          deliveryType: b.deliveryType === 'stop_desk' ? 'stop_desk' : 'home',
+          productId: b.productId ? Number(b.productId) : null,
+          productName: String(b.productName || 'Article en cours').trim(),
+          productPriceDzd: Math.max(0, Math.round(Number(b.productPriceDzd) || 0)),
+          quantity: Math.max(1, Math.round(Number(b.quantity) || 1)),
+          selectedColor: b.selectedColor ? String(b.selectedColor).trim() : null,
+          sourcePage: String(b.sourcePage || 'product'),
+          status: 'en_attente',
+        })
+        .returning();
+
+      return res.json({ captured: true, abandonedOrder: created });
+    } catch (error) {
+      return res.json({ captured: false });
+    }
+  });
+
   // Public Order Tracking via Reference (+ optional phone verification)
+  // Public Ad Catalog Feed (2FP AdCatalogFeed — Meta / Facebook & TikTok Catalog XML & CSV)
+  app.get('/api/feed/catalog.xml', async (req, res) => {
+    try {
+      const origin = `${req.protocol}://${req.get('host')}`;
+      const [settingsRow] = await db.select().from(storeSettings).limit(1);
+      const storeTitle = settingsRow?.storeName || '2Frères Phone';
+      const activeProds = await db
+        .select()
+        .from(products)
+        .where(eq(products.isActive, true))
+        .orderBy(desc(products.createdAt));
+      const allImgs = await db
+        .select()
+        .from(productImages)
+        .orderBy(desc(productImages.isPrimary), asc(productImages.sortOrder));
+      const imgByProd = new Map<number, string>();
+      for (const img of allImgs) {
+        if (!imgByProd.has(img.productId)) {
+          imgByProd.set(
+            img.productId,
+            img.url.startsWith('http') ? img.url : `${origin}${img.url}`,
+          );
+        }
+      }
+      const escXml = (s: string) =>
+        String(s || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+
+      const itemsXml = activeProds
+        .map((p) => {
+          const link = `${origin}/produit/${encodeURIComponent(p.slug)}`;
+          const img = imgByProd.get(p.id) || `${origin}/favicon.svg`;
+          const avail =
+            p.productType === 'digital' || p.stockQuantity > 0 ? 'in stock' : 'out of stock';
+          return `    <item>
+      <g:id>${escXml(p.sku || String(p.id))}</g:id>
+      <g:title>${escXml(p.name)}</g:title>
+      <g:description>${escXml(p.shortDescription || p.description || p.name)}</g:description>
+      <g:link>${escXml(link)}</g:link>
+      <g:image_link>${escXml(img)}</g:image_link>
+      <g:brand>${escXml(p.brand || storeTitle)}</g:brand>
+      <g:condition>new</g:condition>
+      <g:availability>${avail}</g:availability>
+      <g:price>${Math.max(0, Number(p.priceDzd) || 0)} DZD</g:price>
+    </item>`;
+        })
+        .join('\n');
+
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">
+  <channel>
+    <title>${escXml(storeTitle)} — Catalogue Produits COD Algérie (DZD)</title>
+    <link>${escXml(origin)}</link>
+    <description>Flux Catalogue Publicitaire 2FP AdCatalogFeed (Meta / TikTok / Google Shopping — DZD)</description>
+${itemsXml}
+  </channel>
+</rss>`;
+      res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+      return res.send(xml);
+    } catch (error) {
+      console.error('Catalog XML feed error:', error);
+      return res.status(500).send('Erreur flux XML');
+    }
+  });
+
+  app.get('/api/feed/catalog.csv', async (req, res) => {
+    try {
+      const origin = `${req.protocol}://${req.get('host')}`;
+      const [settingsRow] = await db.select().from(storeSettings).limit(1);
+      const storeTitle = settingsRow?.storeName || '2Frères Phone';
+      const activeProds = await db
+        .select()
+        .from(products)
+        .where(eq(products.isActive, true))
+        .orderBy(desc(products.createdAt));
+      const allImgs = await db
+        .select()
+        .from(productImages)
+        .orderBy(desc(productImages.isPrimary), asc(productImages.sortOrder));
+      const imgByProd = new Map<number, string>();
+      for (const img of allImgs) {
+        if (!imgByProd.has(img.productId)) {
+          imgByProd.set(
+            img.productId,
+            img.url.startsWith('http') ? img.url : `${origin}${img.url}`,
+          );
+        }
+      }
+      const escCsv = (val: string | number) => {
+        const str = String(val ?? '');
+        return /[",\n;]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+      };
+      const headers = [
+        'id',
+        'title',
+        'description',
+        'availability',
+        'condition',
+        'price',
+        'link',
+        'image_link',
+        'brand',
+      ];
+      const rows = activeProds.map((p) => [
+        p.sku || String(p.id),
+        p.name,
+        p.shortDescription || p.description || p.name,
+        p.productType === 'digital' || p.stockQuantity > 0 ? 'in stock' : 'out of stock',
+        'new',
+        `${Math.max(0, Number(p.priceDzd) || 0)} DZD`,
+        `${origin}/produit/${encodeURIComponent(p.slug)}`,
+        imgByProd.get(p.id) || `${origin}/favicon.svg`,
+        p.brand || storeTitle,
+      ]);
+      const csv = [headers.join(','), ...rows.map((r) => r.map(escCsv).join(','))].join('\n');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="2fp-catalog-feed.csv"');
+      return res.send(csv);
+    } catch (error) {
+      console.error('Catalog CSV feed error:', error);
+      return res.status(500).send('Erreur flux CSV');
+    }
+  });
+
   app.get('/api/orders/track', async (req, res) => {
     try {
       const ref = String(req.query.reference || '').trim().toUpperCase();
@@ -1141,7 +1551,7 @@ export function createApp() {
         historyByOrder.set(h.orderId, list);
       }
 
-      // Compute per-phone reliability stats (inspired by Mystoq/Tassyir anti-return tracking)
+      // Compute per-phone reliability stats (2FP ColisGuard anti-return tracking)
       const phoneStats = new Map<string, { total: number; delivered: number; returned: number; cancelled: number }>();
       for (const o of allOrders) {
         const key = normalizeAlgerianPhone(o.phone);
@@ -1175,11 +1585,37 @@ export function createApp() {
   app.patch('/api/admin/orders/:id', requireAdmin, async (req: AuthRequest, res) => {
     try {
       const orderId = Number(req.params.id);
-      const { status, trackingNumber, carrierId, adminNotes, paymentStatus, note } = req.body || {};
+      const {
+        status,
+        trackingNumber,
+        carrierId,
+        adminNotes,
+        paymentStatus,
+        note,
+        callStatus,
+        callAttempts,
+        callNotes,
+      } = req.body || {};
       const [existing] = await db.select().from(orders).where(eq(orders.id, orderId));
       if (!existing) return res.status(404).json({ error: 'Commande introuvable.' });
 
-      const nextStatus = (status || existing.status) as OrderStatus;
+      let derivedStatus = status as OrderStatus | undefined;
+      if (!derivedStatus && callStatus) {
+        if (callStatus === 'confirme_tel' && (existing.status === 'nouvelle' || existing.status === 'a_confirmer')) {
+          derivedStatus = 'confirmee';
+        } else if (callStatus === 'annule_client' || callStatus === 'faux_numero') {
+          derivedStatus = 'annulee';
+        } else if (
+          (callStatus === 'appel_1_sans_reponse' ||
+            callStatus === 'appel_2_eteint' ||
+            callStatus === 'appel_3_reporte') &&
+          existing.status === 'nouvelle'
+        ) {
+          derivedStatus = 'a_confirmer';
+        }
+      }
+
+      const nextStatus = (derivedStatus || existing.status) as OrderStatus;
       let nextCarrierName = existing.carrierName;
       let nextCarrierId = existing.carrierId;
       if (carrierId !== undefined) {
@@ -1256,10 +1692,21 @@ export function createApp() {
       const nextPaymentStatus =
         paymentStatus || (nextStatus === 'livree' ? 'paid' : existing.paymentStatus);
 
+      const nextCallStatus = callStatus !== undefined ? String(callStatus) : existing.callStatus;
+      const nextCallAttempts =
+        callAttempts !== undefined
+          ? Math.max(0, Number(callAttempts) || 0)
+          : callStatus && callStatus !== existing.callStatus && callStatus !== 'non_appele'
+          ? (existing.callAttempts || 0) + 1
+          : existing.callAttempts || 0;
+
       const [updated] = await db
         .update(orders)
         .set({
           status: nextStatus,
+          callStatus: nextCallStatus,
+          callAttempts: nextCallAttempts,
+          callNotes: callNotes !== undefined ? String(callNotes) : existing.callNotes,
           trackingNumber: trackingNumber !== undefined ? trackingNumber : existing.trackingNumber,
           carrierId: nextCarrierId,
           carrierName: nextCarrierName,
@@ -1389,6 +1836,91 @@ export function createApp() {
     } catch (error) {
       console.error('Admin delete order error:', error);
       return res.status(500).json({ error: 'Erreur lors de la suppression de la commande.' });
+    }
+  });
+
+  // Batch COD Carrier Payment Reconciliation (2FP CodReconcile — Pointage des Versements Transporteurs)
+  app.post('/api/admin/orders/reconcile-cod', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const rawIds = Array.isArray(req.body?.orderIds) ? req.body.orderIds : [];
+      const orderIds = Array.from(
+        new Set(
+          rawIds
+            .map((id: unknown) => Number(id))
+            .filter((n: number) => Number.isInteger(n) && n > 0),
+        ),
+      ) as number[];
+      const targetPaymentStatus = req.body?.paymentStatus === 'unpaid' ? 'unpaid' : 'paid';
+
+      if (orderIds.length === 0) {
+        return res.status(400).json({ error: 'Aucune commande sélectionnée pour le pointage COD.' });
+      }
+
+      const updatedOrders = await db
+        .update(orders)
+        .set({
+          paymentStatus: targetPaymentStatus,
+          updatedAt: new Date(),
+        })
+        .where(inArray(orders.id, orderIds))
+        .returning();
+
+      const totalReconciledDzd = updatedOrders.reduce((acc, o) => acc + (Number(o.totalDzd) || 0), 0);
+
+      return res.json({
+        reconciledCount: updatedOrders.length,
+        paymentStatus: targetPaymentStatus,
+        totalReconciledDzd,
+      });
+    } catch (error) {
+      console.error('COD reconciliation error:', error);
+      return res.status(500).json({ error: 'Erreur lors du pointage des versements COD transporteurs.' });
+    }
+  });
+
+  // 1-Click Phone Blacklist from Call Center or Order Detail (2FP Anti-Spam & Faux Numéros)
+  app.post('/api/admin/customers/block-phone', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const rawPhone = String(req.body?.phone || '').trim();
+      const firstName = String(req.body?.firstName || 'Client').trim();
+      const lastName = String(req.body?.lastName || 'Bloqué').trim();
+      const wilayaCode = String(req.body?.wilayaCode || '16').trim();
+      const wilayaName = String(req.body?.wilayaName || 'Alger').trim();
+      const isBlocked = req.body?.isBlocked !== false;
+
+      if (!rawPhone) {
+        return res.status(400).json({ error: 'Numéro de téléphone manquant.' });
+      }
+      const normPhone = normalizeAlgerianPhone(rawPhone);
+      const [existingCust] = await db.select().from(customers).where(eq(customers.phone, normPhone));
+
+      if (existingCust) {
+        const [updated] = await db
+          .update(customers)
+          .set({ isBlocked })
+          .where(eq(customers.id, existingCust.id))
+          .returning();
+        return res.json({ customer: updated, isBlocked: updated.isBlocked });
+      }
+
+      const [created] = await db
+        .insert(customers)
+        .values({
+          phone: normPhone,
+          firstName,
+          lastName,
+          wilayaCode,
+          wilayaName,
+          commune: 'Liste noire',
+          address: 'Bloqué depuis le Centre d’Appel',
+          isBlocked: true,
+        })
+        .returning();
+
+      return res.json({ customer: created, isBlocked: true });
+    } catch (error) {
+      console.error('Block phone error:', error);
+      return res.status(500).json({ error: 'Impossible de mettre à jour la liste noire pour ce numéro.' });
     }
   });
 
@@ -2722,16 +3254,20 @@ export function createApp() {
       }
     }
 
-    // 2. Update existing articles if mode is add_and_update_stock or full_sync (ALWAYS preserving photos!)
+    // 2. Update existing articles if mode is update_stock_and_prices, add_and_update_stock, or full_sync
+    // CRITICAL: ALWAYS preserve existing product photos (product_images), customized product names,
+    // custom descriptions, colors, and categories unless explicitly requested!
     for (const entry of diff.toUpdate) {
       const nextQty = clampInt32(entry.incoming.stockQuantity, 0);
       const updateData: Record<string, unknown> = {
         stockQuantity: nextQty,
         updatedAt: new Date(),
       };
-      if (syncMode === 'full_sync') {
+      if (syncMode === 'update_stock_and_prices' || syncMode === 'full_sync') {
         if (entry.incoming.priceDzd > 0) updateData.priceDzd = clampInt32(entry.incoming.priceDzd, 0);
         if (entry.incoming.costPriceDzd > 0) updateData.costPriceDzd = clampInt32(entry.incoming.costPriceDzd, 0);
+      }
+      if (syncMode === 'full_sync') {
         if (entry.incoming.brand) updateData.brand = String(entry.incoming.brand).slice(0, 80);
         if (entry.incoming.description) updateData.description = String(entry.incoming.description);
       }
@@ -2743,7 +3279,7 @@ export function createApp() {
           delta: clampInt32(entry.stockDelta),
           previousQty: clampInt32(entry.existing.stockQuantity, 0),
           newQty: nextQty,
-          reason: `Synchro fichier stock (${combinedFileName})`,
+          reason: `Mise à jour fichier stock (${combinedFileName})`,
           createdBy: importedBy,
         });
       }
@@ -2762,6 +3298,12 @@ export function createApp() {
     let accountingGeneratedCount = 0;
     if (generateAccounting) {
       await ensureAccountingTableReady();
+      // Replace previous auto-generated import accounting entries so updating a file does not duplicate stock_valuation rows
+      if (!cleanPreviousImports) {
+        await db
+          .execute(sql.raw(`DELETE FROM accounting_entries WHERE import_id IS NOT NULL`))
+          .catch(() => {});
+      }
       const extractedAccounting = extractAccountingEntriesFromTables(
         parsed.tables,
         selectedTableObj.rows,
@@ -2880,7 +3422,7 @@ export function createApp() {
       }
 
       const preferredTable = req.body?.tableName ? String(req.body.tableName) : undefined;
-      const syncMode = (req.body?.syncMode || 'full_sync') as StockSyncMode;
+      const syncMode = (req.body?.syncMode || 'update_stock_and_prices') as StockSyncMode;
       const rawMapStr = req.body?.mappingJson || req.body?.mapping;
       const mapping: ColumnMapping = rawMapStr
         ? typeof rawMapStr === 'string'
@@ -2890,7 +3432,9 @@ export function createApp() {
       const defaultCategoryId = req.body?.defaultCategoryId ? Number(req.body.defaultCategoryId) : null;
       const saveProfileName = req.body?.saveProfileName ? String(req.body.saveProfileName).trim() : '';
       const generateAccounting = req.body?.generateAccounting !== 'false' && req.body?.generateAccounting !== false;
-      const cleanPreviousImports = req.body?.cleanPreviousImports !== 'false' && req.body?.cleanPreviousImports !== false;
+      // Default cleanPreviousImports to FALSE so updating a database file NEVER wipes existing products, photos, or modified texts!
+      const cleanPreviousImports =
+        req.body?.cleanPreviousImports === true || req.body?.cleanPreviousImports === 'true';
 
       const result = await executeDatabaseImportCommit({
         files: filesToCommit,
@@ -2911,7 +3455,7 @@ export function createApp() {
     }
   });
 
-  // 1-Click Regenerate & Fix from the last uploaded .MDF / .IDF backup stored in mediaAssets
+  // 1-Click Update / Regenerate from the last uploaded .MDF / .IDF backup stored in mediaAssets
   app.post('/api/admin/stock/import/regenerate', requireAdmin, async (req: AuthRequest, res) => {
     try {
       const savedBackups = await db
@@ -2921,10 +3465,9 @@ export function createApp() {
         .orderBy(asc(mediaAssets.id));
 
       if (savedBackups.length === 0) {
-        await purgeCorruptedMdfProducts(true);
         return res.status(400).json({
           error:
-            'Les anciennes lignes erronées ont été nettoyées. Veuillez resélectionner votre fichier .MDF dans le Point 1 puis cliquer sur « Sauvegarder & Intégrer maintenant ».',
+            'Aucune sauvegarde stockée sur le serveur. Veuillez sélectionner votre fichier .MDF dans le Point 1 puis cliquer sur « Mettre à jour / Sauvegarder ».',
         });
       }
 
@@ -2934,15 +3477,16 @@ export function createApp() {
       }));
 
       const b = req.body || {};
+      const cleanPrev = b.cleanPreviousImports === true || b.cleanPreviousImports === 'true';
       const result = await executeDatabaseImportCommit({
         files,
         preferredTable: b.tableName ? String(b.tableName) : undefined,
-        syncMode: (b.syncMode || 'full_sync') as StockSyncMode,
+        syncMode: (b.syncMode || 'update_stock_and_prices') as StockSyncMode,
         mapping: b.mapping && b.mapping.name ? b.mapping : { name: '' },
         defaultCategoryId: b.defaultCategoryId ? Number(b.defaultCategoryId) : null,
         saveProfileName: '',
         generateAccounting: b.generateAccounting !== false,
-        cleanPreviousImports: true,
+        cleanPreviousImports: cleanPrev,
         importedBy: req.adminUser?.email || 'admin',
       });
 
@@ -2950,8 +3494,186 @@ export function createApp() {
     } catch (error: any) {
       console.error('Regenerate MDF backup error:', error);
       return res.status(500).json({
-        error: error?.message || 'Erreur lors de la régénération de la sauvegarde .MDF.',
+        error: error?.message || 'Erreur lors de la mise à jour depuis la sauvegarde .MDF.',
       });
+    }
+  });
+
+  // 6b. Export / Extract Full PostgreSQL Database Backup as a standard .SQL file (preserving Products, Photos, Modified Texts, Categories & Accounting)
+  app.get('/api/admin/database/export-sql', requireAdmin, async (req, res) => {
+    try {
+      const scope = String(req.query.scope || 'full');
+      await ensureAccountingTableReady();
+
+      const allCategories = await db.select().from(categories).orderBy(asc(categories.id));
+      const allProducts = await db.select().from(products).orderBy(asc(products.id));
+      const allProductImages = await db.select().from(productImages).orderBy(asc(productImages.id));
+      const allAccounting = await db.select().from(accountingEntries).orderBy(asc(accountingEntries.id));
+      const allOrders = scope === 'full' ? await db.select().from(orders).orderBy(asc(orders.id)) : [];
+      const allSales = scope === 'full' ? await db.select().from(sales).orderBy(asc(sales.id)) : [];
+
+      const sqlLit = (v: unknown): string => {
+        if (v === null || v === undefined) return 'NULL';
+        if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+        if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '0';
+        if (v instanceof Date) return `'${v.toISOString().replace(/'/g, "''")}'`;
+        return `'${String(v).replace(/'/g, "''")}'`;
+      };
+
+      const lines: string[] = [];
+      const nowIso = new Date().toISOString();
+      lines.push(`-- ============================================================================`);
+      lines.push(`-- SAUVEGARDE SQL 2FRÈRES PHONE (${scope === 'full' ? 'BASE COMPLÈTE' : 'CATALOGUE + PHOTOS + TEXTES + COMPTA'})`);
+      lines.push(`-- Date d'extraction : ${nowIso}`);
+      lines.push(`-- Catégories : ${allCategories.length} | Produits : ${allProducts.length} | Photos : ${allProductImages.length} | Compta : ${allAccounting.length}`);
+      lines.push(`-- Ce fichier .SQL conserve vos photos (Lumina Studio 2FP/galerie), textes modifiés, catégories, stock et prix.`);
+      lines.push(`-- ============================================================================`);
+      lines.push(`BEGIN;`);
+      lines.push(``);
+
+      if (allCategories.length > 0) {
+        lines.push(`-- 1. CATÉGORIES (${allCategories.length})`);
+        for (const c of allCategories) {
+          lines.push(
+            `INSERT INTO categories (id, name, slug, category_group, description, sort_order, is_active) VALUES (${sqlLit(c.id)}, ${sqlLit(c.name)}, ${sqlLit(c.slug)}, ${sqlLit(c.categoryGroup)}, ${sqlLit(c.description)}, ${sqlLit(c.sortOrder)}, ${sqlLit(c.isActive)}) ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, category_group = EXCLUDED.category_group, description = EXCLUDED.description, is_active = EXCLUDED.is_active;`,
+          );
+        }
+        lines.push(``);
+      }
+
+      if (allProducts.length > 0) {
+        lines.push(`-- 2. PRODUITS, TEXTES PERSONNALISÉS, PRIX D'ACHAT / VENTE & STOCK (${allProducts.length})`);
+        for (const p of allProducts) {
+          lines.push(
+            `INSERT INTO products (id, category_id, sku, barcode, external_ref, name, slug, brand, short_description, description, colors_json, product_type, price_dzd, compare_at_price_dzd, cost_price_dzd, stock_quantity, low_stock_threshold, is_featured, is_active, digital_availability, digital_activation_template) VALUES (${sqlLit(p.id)}, ${sqlLit(p.categoryId)}, ${sqlLit(p.sku)}, ${sqlLit(p.barcode)}, ${sqlLit(p.externalRef)}, ${sqlLit(p.name)}, ${sqlLit(p.slug)}, ${sqlLit(p.brand)}, ${sqlLit(p.shortDescription)}, ${sqlLit(p.description)}, ${sqlLit((p as any).colorsJson || '[]')}, ${sqlLit(p.productType)}, ${sqlLit(p.priceDzd)}, ${sqlLit(p.compareAtPriceDzd)}, ${sqlLit(p.costPriceDzd)}, ${sqlLit(p.stockQuantity)}, ${sqlLit(p.lowStockThreshold)}, ${sqlLit(p.isFeatured)}, ${sqlLit(p.isActive)}, ${sqlLit(p.digitalAvailability)}, ${sqlLit(p.digitalActivationTemplate)}) ON CONFLICT (sku) DO UPDATE SET name = EXCLUDED.name, short_description = EXCLUDED.short_description, description = EXCLUDED.description, colors_json = EXCLUDED.colors_json, category_id = COALESCE(EXCLUDED.category_id, products.category_id), price_dzd = EXCLUDED.price_dzd, compare_at_price_dzd = EXCLUDED.compare_at_price_dzd, cost_price_dzd = EXCLUDED.cost_price_dzd, stock_quantity = EXCLUDED.stock_quantity, is_featured = EXCLUDED.is_featured, is_active = EXCLUDED.is_active, updated_at = NOW();`,
+          );
+        }
+        lines.push(``);
+      }
+
+      if (allProductImages.length > 0) {
+        lines.push(`-- 3. PHOTOS PRODUITS & PHOTOS LUMINA STUDIO 2FP (${allProductImages.length})`);
+        for (const img of allProductImages) {
+          lines.push(
+            `INSERT INTO product_images (id, product_id, url, alt_text, sort_order, is_primary) VALUES (${sqlLit(img.id)}, ${sqlLit(img.productId)}, ${sqlLit(img.url)}, ${sqlLit(img.altText)}, ${sqlLit(img.sortOrder)}, ${sqlLit(img.isPrimary)}) ON CONFLICT (id) DO UPDATE SET url = EXCLUDED.url, alt_text = EXCLUDED.alt_text, sort_order = EXCLUDED.sort_order, is_primary = EXCLUDED.is_primary;`,
+          );
+        }
+        lines.push(``);
+      }
+
+      if (allAccounting.length > 0) {
+        lines.push(`-- 4. ÉCRITURES COMPTABLES & VALORISATION STOCK (${allAccounting.length})`);
+        for (const a of allAccounting) {
+          lines.push(
+            `INSERT INTO accounting_entries (id, reference, entry_type, category, label, partner_name, amount_dzd, cost_dzd, margin_dzd, payment_method, source_file, notes) VALUES (${sqlLit(a.id)}, ${sqlLit(a.reference)}, ${sqlLit(a.entryType)}, ${sqlLit(a.category)}, ${sqlLit(a.label)}, ${sqlLit(a.partnerName)}, ${sqlLit(a.amountDzd)}, ${sqlLit(a.costDzd)}, ${sqlLit(a.marginDzd)}, ${sqlLit(a.paymentMethod)}, ${sqlLit(a.sourceFile)}, ${sqlLit(a.notes)}) ON CONFLICT (id) DO UPDATE SET amount_dzd = EXCLUDED.amount_dzd, cost_dzd = EXCLUDED.cost_dzd, margin_dzd = EXCLUDED.margin_dzd, label = EXCLUDED.label;`,
+          );
+        }
+        lines.push(``);
+      }
+
+      lines.push(`COMMIT;`);
+
+      const dateStr = nowIso.slice(0, 10);
+      const filename =
+        scope === 'full'
+          ? `2freres-phone-sauvegarde-complete-${dateStr}.sql`
+          : `2freres-phone-catalogue-photos-compta-${dateStr}.sql`;
+
+      return res.json({
+        filename,
+        sqlContent: lines.join('\n'),
+        stats: {
+          categoriesCount: allCategories.length,
+          productsCount: allProducts.length,
+          imagesCount: allProductImages.length,
+          accountingCount: allAccounting.length,
+          ordersCount: allOrders.length,
+          salesCount: allSales.length,
+        },
+      });
+    } catch (error: any) {
+      console.error('Export SQL backup error:', error);
+      return res.status(500).json({ error: error?.message || 'Erreur lors de la génération de la sauvegarde .SQL.' });
+    }
+  });
+
+  // 6c. Restore / Merge from a .SQL backup file without losing existing photos or custom texts
+  app.post('/api/admin/database/restore-sql', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const { sqlContent, fileName } = req.body || {};
+      if (!sqlContent || typeof sqlContent !== 'string') {
+        return res.status(400).json({ error: 'Contenu .SQL manquant.' });
+      }
+
+      await ensureAccountingTableReady();
+
+      // Check if this is a 2Frères Phone native PostgreSQL dump containing INSERT INTO categories/products/product_images
+      const isNativeDump =
+        /INSERT\s+INTO\s+(categories|products|product_images|accounting_entries)\s*\(/i.test(sqlContent);
+
+      let executedStatements = 0;
+      if (isNativeDump) {
+        const statements = sqlContent
+          .split(/;\s*(?:\r?\n|$)/)
+          .map((s) => s.trim())
+          .filter(
+            (s) =>
+              s.length > 0 &&
+              !s.startsWith('--') &&
+              /^INSERT\s+INTO\s+(categories|products|product_images|accounting_entries)\b/i.test(s),
+          );
+
+        for (const stmt of statements) {
+          try {
+            await db.execute(sql.raw(stmt));
+            executedStatements++;
+          } catch (stmtErr) {
+            console.warn('SQL restore statement warning:', stmtErr);
+          }
+        }
+
+        // Advance PostgreSQL sequences safely
+        await db
+          .execute(
+            sql.raw(`
+              SELECT setval(pg_get_serial_sequence('categories', 'id'), COALESCE((SELECT MAX(id) FROM categories), 1), true);
+              SELECT setval(pg_get_serial_sequence('products', 'id'), COALESCE((SELECT MAX(id) FROM products), 1), true);
+              SELECT setval(pg_get_serial_sequence('product_images', 'id'), COALESCE((SELECT MAX(id) FROM product_images), 1), true);
+            `),
+          )
+          .catch(() => {});
+
+        await syncAllLowStockAlerts().catch(() => {});
+
+        return res.json({
+          ok: true,
+          mode: 'native_sql_restore',
+          executedStatements,
+          message: `Sauvegarde .SQL (${fileName || 'backup.sql'}) restaurée avec succès (${executedStatements} enregistrements synchronisés avec photos et textes conservés).`,
+        });
+      }
+
+      // Otherwise, parse generic third-party .SQL dump via universal importer in non-destructive update_stock_and_prices mode
+      const result = await executeDatabaseImportCommit({
+        files: [{ buffer: Buffer.from(sqlContent, 'utf-8'), originalname: fileName || 'import.sql' }],
+        syncMode: 'update_stock_and_prices',
+        mapping: { name: '' },
+        defaultCategoryId: null,
+        saveProfileName: '',
+        generateAccounting: true,
+        cleanPreviousImports: false,
+        importedBy: req.adminUser?.email || 'admin',
+      });
+
+      return res.json({
+        ok: true,
+        mode: 'differential_sql_sync',
+        ...result,
+        message: `Fichier .SQL synchronisé sans perte : +${result.importRecord?.addedCount ?? 0} nouveaux articles, ${result.importRecord?.updatedCount ?? 0} mis à jour (photos et textes conservés).`,
+      });
+    } catch (error: any) {
+      console.error('Restore SQL error:', error);
+      return res.status(500).json({ error: error?.message || 'Erreur lors de la restauration du fichier .SQL.' });
     }
   });
 
@@ -3152,6 +3874,112 @@ export function createApp() {
       return res.json({ deleted: true });
     } catch (error) {
       return res.status(500).json({ error: 'Erreur suppression transporteur.' });
+    }
+  });
+
+  // Activate ONLY this carrier and deactivate all other carriers
+  app.post('/api/admin/carriers/:id/set-exclusive', requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [target] = await db.select().from(carriers).where(eq(carriers.id, id));
+      if (!target) return res.status(404).json({ error: 'Transporteur introuvable.' });
+
+      await db.update(carriers).set({ isActive: false });
+      await db.update(carriers).set({ isActive: true }).where(eq(carriers.id, id));
+
+      // Also ensure its 58 wilaya rates are active if requested
+      if (req.body?.activateRates !== false) {
+        await db
+          .update(shippingRates)
+          .set({ isActive: true, updatedAt: new Date() })
+          .where(eq(shippingRates.carrierId, id));
+      }
+
+      return res.json({
+        ok: true,
+        exclusiveCarrierId: id,
+        message: `${target.name} est désormais votre unique transporteur actif. Tous les autres transporteurs ont été désactivés.`,
+      });
+    } catch (error) {
+      return res.status(500).json({ error: 'Impossible de définir ce transporteur comme exclusif.' });
+    }
+  });
+
+  // Bulk enable / disable / zero shipping rates for a specific carrier
+  app.post('/api/admin/carriers/:id/bulk-rates', requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const action = String(req.body?.action || '').trim();
+      const [target] = await db.select().from(carriers).where(eq(carriers.id, id));
+      if (!target) return res.status(404).json({ error: 'Transporteur introuvable.' });
+
+      if (action === 'deactivate_all') {
+        await db
+          .update(shippingRates)
+          .set({ isActive: false, updatedAt: new Date() })
+          .where(eq(shippingRates.carrierId, id));
+        return res.json({
+          ok: true,
+          message: `Tous les tarifs 58 wilayas de ${target.name} ont été désactivés (0 DZD facturé).`,
+        });
+      }
+
+      if (action === 'activate_all') {
+        await db
+          .update(shippingRates)
+          .set({ isActive: true, updatedAt: new Date() })
+          .where(eq(shippingRates.carrierId, id));
+        return res.json({
+          ok: true,
+          message: `Tous les tarifs 58 wilayas de ${target.name} ont été réactivés.`,
+        });
+      }
+
+      if (action === 'zero_prices') {
+        await db
+          .update(shippingRates)
+          .set({ homePriceDzd: 0, stopDeskPriceDzd: 0, updatedAt: new Date() })
+          .where(eq(shippingRates.carrierId, id));
+        return res.json({
+          ok: true,
+          message: `Tous les prix Domicile & Stop Desk de ${target.name} ont été remis à 0 DZD.`,
+        });
+      }
+
+      return res.status(400).json({ error: 'Action bulk-rates non reconnue.' });
+    } catch (error) {
+      return res.status(500).json({ error: 'Erreur lors de la mise à jour groupée des tarifs.' });
+    }
+  });
+
+  // Bulk operations across all carriers (deactivate all carriers, deactivate all prices, activate all prices)
+  app.post('/api/admin/carriers/bulk-all', requireAdmin, async (req, res) => {
+    try {
+      const action = String(req.body?.action || '').trim();
+      if (action === 'deactivate_all_carriers') {
+        await db.update(carriers).set({ isActive: false });
+        return res.json({
+          ok: true,
+          message: 'Tous les transporteurs ont été désactivés.',
+        });
+      }
+      if (action === 'deactivate_all_prices') {
+        await db.update(shippingRates).set({ isActive: false, updatedAt: new Date() });
+        return res.json({
+          ok: true,
+          message: 'Tous les prix des transporteurs (58 Wilayas) ont été désactivés.',
+        });
+      }
+      if (action === 'activate_all_prices') {
+        await db.update(shippingRates).set({ isActive: true, updatedAt: new Date() });
+        return res.json({
+          ok: true,
+          message: 'Tous les prix des transporteurs (58 Wilayas) ont été réactivés.',
+        });
+      }
+      return res.status(400).json({ error: 'Action globale transporteurs non reconnue.' });
+    } catch (error) {
+      return res.status(500).json({ error: 'Erreur lors de la mise à jour globale des transporteurs.' });
     }
   });
 
@@ -3539,7 +4367,8 @@ export function createApp() {
       const b = req.body || {};
       const email = String(b.email || '').trim().toLowerCase();
       const fullName = String(b.fullName || '').trim() || 'Co-gérant 2Frères Phone';
-      const role = b.role === 'super_admin' ? 'super_admin' : 'admin';
+      const allowedRoles = ['super_admin', 'admin', 'confirmateur', 'preparateur'];
+      const role = allowedRoles.includes(String(b.role)) ? String(b.role) : 'admin';
 
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return res.status(400).json({ error: 'Veuillez saisir une adresse e-mail Google valide.' });
@@ -3585,11 +4414,14 @@ export function createApp() {
         return res.status(400).json({ error: 'Vous ne pouvez pas désactiver votre propre compte administrateur.' });
       }
 
+      const allowedRoles = ['super_admin', 'admin', 'confirmateur', 'preparateur'];
+      const nextRole = allowedRoles.includes(String(b.role)) ? String(b.role) : target.role;
+
       const [updated] = await db
         .update(adminUsers)
         .set({
           fullName: b.fullName !== undefined ? String(b.fullName).trim() : target.fullName,
-          role: b.role === 'super_admin' || b.role === 'admin' ? b.role : target.role,
+          role: nextRole,
           isActive: b.isActive !== undefined ? Boolean(b.isActive) : target.isActive,
         })
         .where(eq(adminUsers.id, id))
@@ -3599,6 +4431,197 @@ export function createApp() {
     } catch (error) {
       console.error('Update admin error:', error);
       return res.status(500).json({ error: 'Erreur mise à jour administrateur.' });
+    }
+  });
+
+  // 15b. Abandoned Orders Management & 1-Click Conversion to Real COD Order + Google Sheets Sync
+  app.get('/api/admin/abandoned-orders', requireAdmin, async (_req, res) => {
+    try {
+      const rows = await db
+        .select()
+        .from(abandonedOrders)
+        .orderBy(desc(abandonedOrders.updatedAt));
+      return res.json({ abandonedOrders: rows });
+    } catch (error) {
+      return res.status(500).json({ error: 'Erreur lors du chargement des paniers abandonnés.' });
+    }
+  });
+
+  app.patch('/api/admin/abandoned-orders/:id', requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const { status, notes } = req.body || {};
+      const [existing] = await db.select().from(abandonedOrders).where(eq(abandonedOrders.id, id));
+      if (!existing) return res.status(404).json({ error: 'Panier abandonné introuvable.' });
+      const [updated] = await db
+        .update(abandonedOrders)
+        .set({
+          status: status !== undefined ? String(status) : existing.status,
+          notes: notes !== undefined ? String(notes) : existing.notes,
+          updatedAt: new Date(),
+        })
+        .where(eq(abandonedOrders.id, id))
+        .returning();
+      return res.json({ abandonedOrder: updated });
+    } catch (error) {
+      return res.status(500).json({ error: 'Erreur mise à jour du panier abandonné.' });
+    }
+  });
+
+  app.post('/api/admin/abandoned-orders/:id/convert', requireAdmin, async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [ab] = await db.select().from(abandonedOrders).where(eq(abandonedOrders.id, id));
+      if (!ab) return res.status(404).json({ error: 'Panier abandonné introuvable.' });
+
+      const parts = String(ab.fullName || 'Client Algérie').trim().split(/\s+/);
+      const firstName = parts[0] || 'Client';
+      const lastName = parts.slice(1).join(' ') || 'Algérie';
+      const normalizedPhone = normalizeAlgerianPhone(ab.phone);
+      const wilaya = getWilayaByCode(ab.wilayaCode) || { code: '16', name: 'Alger' };
+      const commune = ab.commune || wilaya.name;
+      const address = ab.commune ? `${ab.commune}, ${wilaya.name}` : wilaya.name;
+
+      const unitPrice = Math.max(0, ab.productPriceDzd || 0);
+      const qty = Math.max(1, ab.quantity || 1);
+      const subtotalDzd = unitPrice * qty;
+
+      const [customer] = await db
+        .insert(customers)
+        .values({
+          firstName,
+          lastName,
+          phone: normalizedPhone,
+          wilayaCode: wilaya.code,
+          wilayaName: wilaya.name,
+          commune,
+          address,
+        })
+        .onConflictDoUpdate({
+          target: customers.phone,
+          set: {
+            firstName,
+            lastName,
+            wilayaCode: wilaya.code,
+            wilayaName: wilaya.name,
+            commune,
+            address,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+
+      const countRes = await db.select({ count: sql<number>`count(*)::int` }).from(orders);
+      const nextSeq = (countRes[0]?.count ?? 0) + 101;
+      const reference = generateOrderReference(nextSeq);
+
+      const [createdOrder] = await db
+        .insert(orders)
+        .values({
+          reference,
+          customerId: customer.id,
+          firstName,
+          lastName,
+          phone: normalizedPhone,
+          wilayaCode: wilaya.code,
+          wilayaName: wilaya.name,
+          commune,
+          address,
+          deliveryType: ab.deliveryType === 'stop_desk' ? 'stop_desk' : 'home',
+          status: 'confirmee',
+          callStatus: 'confirme_tel',
+          callAttempts: 1,
+          paymentMethod: 'cod',
+          paymentStatus: 'pending',
+          subtotalDzd,
+          discountDzd: 0,
+          shippingFeeDzd: 0,
+          totalDzd: subtotalDzd,
+          hasDigitalItems: false,
+          hasPhysicalItems: true,
+          stockDeducted: false,
+          source: 'admin',
+          customerNotes: `[Panier abandonné récupéré par téléphone]${ab.selectedColor ? ` · Couleur : ${ab.selectedColor}` : ''}`,
+        })
+        .returning();
+
+      await db.insert(orderItems).values({
+        orderId: createdOrder.id,
+        productId: ab.productId,
+        productName: `${ab.productName}${ab.selectedColor ? ` — Couleur : ${ab.selectedColor}` : ''}`,
+        productSku: ab.productId ? `REC-${ab.productId}` : 'REC-COD',
+        productType: 'physical',
+        unitPriceDzd: unitPrice,
+        costPriceDzd: 0,
+        quantity: qty,
+        lineTotalDzd: subtotalDzd,
+      });
+
+      await db
+        .update(abandonedOrders)
+        .set({
+          status: 'recuperee',
+          recoveredOrderId: createdOrder.id,
+          updatedAt: new Date(),
+        })
+        .where(eq(abandonedOrders.id, ab.id));
+
+      return res.json({
+        ok: true,
+        order: createdOrder,
+        message: `Panier abandonné converti en commande confirmée (${createdOrder.reference}) !`,
+      });
+    } catch (error) {
+      console.error('Convert abandoned order error:', error);
+      return res.status(500).json({ error: 'Impossible de convertir ce panier abandonné en commande.' });
+    }
+  });
+
+  app.delete('/api/admin/abandoned-orders/:id', requireAdmin, async (req, res) => {
+    try {
+      await db.delete(abandonedOrders).where(eq(abandonedOrders.id, Number(req.params.id)));
+      return res.json({ deleted: true });
+    } catch (error) {
+      return res.status(500).json({ error: 'Erreur suppression panier abandonné.' });
+    }
+  });
+
+  app.post('/api/admin/webhooks/google-sheets-test', requireAdmin, async (req, res) => {
+    try {
+      const webhookUrl = String(req.body?.webhookUrl || '').trim();
+      if (!webhookUrl || !/^https:\/\//i.test(webhookUrl)) {
+        return res.status(400).json({ error: 'Veuillez saisir une URL Webhook Google Sheets valide (https://...).' });
+      }
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event: 'test_connection',
+          store: '2Frères Phone (2FP)',
+          reference: '2FP-TEST-000001',
+          createdAt: new Date().toISOString(),
+          customerName: 'Test Synchronisation Google Sheets',
+          phone: '0550000000',
+          wilaya: '16 - Alger',
+          commune: 'Bab Ezzouar',
+          address: 'Test Webhook 2Frères Phone',
+          deliveryType: 'home',
+          items: 'Article Test 2Frères Phone x1',
+          subtotalDzd: 3500,
+          shippingFeeDzd: 500,
+          totalDzd: 4000,
+          status: 'nouvelle',
+        }),
+      });
+      return res.json({
+        ok: true,
+        status: response.status,
+        message: `Test envoyé avec succès vers Google Sheets (Code HTTP ${response.status}) !`,
+      });
+    } catch (error: any) {
+      return res.status(400).json({
+        error: `Impossible de joindre le Webhook Google Sheets : ${error?.message || 'Vérifiez votre URL Apps Script.'}`,
+      });
     }
   });
 
@@ -3620,7 +4643,7 @@ export function createApp() {
   });
 
   // ---------------------------------------------------------------------------
-  // 16. PAGEPILOT: AI LANDING PAGE BUILDER (Admin + Public Conversion Pages)
+  // 16. 2FP VITRINEPRO IA: AI LANDING PAGE BUILDER (Admin + Public Conversion Pages)
   // ---------------------------------------------------------------------------
   const serializeLandingPage = (row: typeof landingPages.$inferSelect) => {
     const parseJsonSafe = <T,>(raw: string | null | undefined, fallback: T): T => {
@@ -3676,8 +4699,8 @@ export function createApp() {
     }
   });
 
-  // Admin: PagePilot AI Generator using @google/genai (gemini-4-hydrogen) with Multimodal Photo Analysis
-  app.post('/api/admin/pagepilot/generate', requireAdmin, async (req, res) => {
+  // Admin: 2FP VitrinePro IA Generator using @google/genai (gemini-4-hydrogen) with Multimodal Photo Analysis
+  app.post(['/api/admin/vitrinepro/generate', '/api/admin/pagepilot/generate'], requireAdmin, async (req, res) => {
     const b = req.body || {};
     const rawProductName = String(b.productName || '').trim();
     const priceDzd = Math.max(0, Math.round(Number(b.priceDzd) || 0));
@@ -3915,7 +4938,7 @@ export function createApp() {
         },
       });
 
-      const promptText = `Tu es PagePilot AI (propulsé par Gemini Vision), expert en création de landing pages e-commerce à très haute conversion pour le marché algérien (boutique "2Frères Phone").
+      const promptText = `Tu es 2FP VitrinePro IA (propulsé par Gemini Vision), expert en création de landing pages e-commerce à très haute conversion pour le marché algérien (boutique "2Frères Phone").
 ${
   imageParts.length > 0
     ? `Analyse attentivement la ou les ${imageParts.length} photo(s) du produit ci-jointes. Identifie visuellement le produit exact (type d'appareil ou accessoire, marque/modèle si visible, design, connectique, fonctionnalités visibles, couleur, finition) et rédige la TOTALITÉ de la landing page de vente à partir de ces photos.`
@@ -4053,13 +5076,13 @@ Génère en français :
 
       return await maybeAutoPublish(finalGenerated, 'gemini');
     } catch (error) {
-      console.warn('PagePilot Gemini fallback to template:', error);
+      console.warn('2FP VitrinePro Gemini fallback to template:', error);
       return await maybeAutoPublish(buildTemplateCopy(), 'template');
     }
   });
 
-  // Admin: Okwin AI Studio — Interpret custom background/scene prompt with Gemini (gemini-4-hydrogen)
-  app.post('/api/admin/okwin/scene-prompt', requireAdmin, async (req, res) => {
+  // Admin: 2FP Lumina Studio IA — Interpret custom background/scene prompt with Gemini (gemini-4-hydrogen)
+  app.post(['/api/admin/lumina/scene-prompt', '/api/admin/okwin/scene-prompt'], requireAdmin, async (req, res) => {
     const b = req.body || {};
     const customPrompt = String(b.prompt || '').trim();
     const productName = String(b.productName || 'Produit 2Frères Phone').trim();
@@ -4124,7 +5147,7 @@ Génère en français :
 
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
-        contents: `Tu es Okwin AI Studio, directeur artistique photo e-commerce pour "2Frères Phone".
+        contents: `Tu es 2FP Lumina Studio IA, directeur artistique photo e-commerce pour "2Frères Phone".
 Le vendeur souhaite modifier l'arrière-plan et générer 4 variations studio de la photo du produit "${productName}" avec ce prompt personnalisé :
 "${customPrompt}"
 
@@ -4170,13 +5193,13 @@ Génère 4 variations visuelles complémentaires (codes couleurs hexadécimaux #
           : defaultVariations;
       return res.json({ variations, source: 'gemini' });
     } catch (err) {
-      console.warn('Okwin Gemini prompt fallback:', err);
+      console.warn('2FP Lumina Studio Gemini prompt fallback:', err);
       return res.json({ variations: defaultVariations, source: 'preset' });
     }
   });
 
-  // Admin: Okwin AI Studio — Analyze non-white / complex background photo with Gemini Vision to return a subject contour polygon
-  app.post('/api/admin/okwin/analyze-subject', requireAdmin, async (req, res) => {
+  // Admin: 2FP Lumina Studio IA — Analyze non-white / complex background photo with Gemini Vision to return a subject contour polygon
+  app.post(['/api/admin/lumina/analyze-subject', '/api/admin/okwin/analyze-subject'], requireAdmin, async (req, res) => {
     const b = req.body || {};
     const imageBase64 = String(b.imageBase64 || '').replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '');
     const mimeType = String(b.mimeType || 'image/jpeg');
@@ -4247,7 +5270,7 @@ Return normalized coordinates where x and y are floats between 0.0 and 1.0 (0,0 
         source: 'gemini-vision',
       });
     } catch (err) {
-      console.warn('Okwin Gemini Vision polygon fallback to local edge-barrier:', err);
+      console.warn('2FP Lumina Studio Vision polygon fallback to local edge-barrier:', err);
       return res.json({ polygon: null, source: 'local' });
     }
   });

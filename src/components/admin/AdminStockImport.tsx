@@ -16,6 +16,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  ShieldCheck,
   Trash2,
   Upload,
 } from 'lucide-react';
@@ -23,6 +24,7 @@ import { adminFetch } from '../../lib/api';
 import { printProductThermalLabels } from '../../lib/printer';
 import { formatDzd, toCsv } from '../../shared/domain';
 import { StoreSettings } from '../../types';
+import { PaginationBar } from '../PaginationBar';
 import { FinancialMarginWidget } from './FinancialMarginWidget';
 import {
   MdfIdfBinaryDecoderModule,
@@ -88,7 +90,9 @@ export function AdminStockImport({
   const [mdfFile, setMdfFile] = useState<File | null>(null);
   const [idfFile, setIdfFile] = useState<File | null>(null);
   const [generateAccounting, setGenerateAccounting] = useState<boolean>(true);
-  const [syncMode, setSyncMode] = useState<'add_only' | 'add_and_update_stock' | 'full_sync'>('full_sync');
+  const [syncMode, setSyncMode] = useState<
+    'update_stock_and_prices' | 'add_only' | 'add_and_update_stock' | 'full_sync'
+  >('update_stock_and_prices');
   const [selectedTable, setSelectedTable] = useState<string>('');
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [defaultCategoryId, setDefaultCategoryId] = useState<string>('');
@@ -116,6 +120,8 @@ export function AdminStockImport({
   const [stockFilter, setStockFilter] = useState<'all' | 'low' | 'out'>('all');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [levelSearch, setLevelSearch] = useState('');
+  const [levelsPage, setLevelsPage] = useState<number>(1);
+  const [levelsPageSize, setLevelsPageSize] = useState<number>(10);
   const [draftRows, setDraftRows] = useState<
     Record<number, { stockQuantity: string; costPriceDzd: string; priceDzd: string }>
   >({});
@@ -207,6 +213,7 @@ export function AdminStockImport({
         body: JSON.stringify({
           useStoredBackup: true,
           syncMode,
+          cleanPreviousImports: false,
           ...(selectedTable ? { tableName: selectedTable } : {}),
           ...(mapping && mapping.name ? { mappingJson: JSON.stringify(mapping) } : {}),
           generateAccounting: generateAccounting ? 'true' : 'false',
@@ -410,6 +417,14 @@ export function AdminStockImport({
       return true;
     });
   }, [physicalProducts, stockFilter, categoryFilter, levelSearch]);
+
+  const totalLevelsPages = Math.max(1, Math.ceil(filteredLevels.length / levelsPageSize));
+  const safeLevelsPage = Math.min(levelsPage, totalLevelsPages);
+
+  const paginatedLevels = useMemo(() => {
+    const startIndex = (safeLevelsPage - 1) * levelsPageSize;
+    return filteredLevels.slice(startIndex, startIndex + levelsPageSize);
+  }, [filteredLevels, safeLevelsPage, levelsPageSize]);
 
   const liveFinancialItems = useMemo(
     () =>
@@ -740,48 +755,61 @@ export function AdminStockImport({
               </div>
             </div>
 
-            {/* Sync Mode & Accounting Generation Checkbox */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {[
-                {
-                  id: 'full_sync',
-                  title: 'Synchronisation complète (Stock + Prix + Compta)',
-                  desc: 'Génère tout votre stock, met à jour les quantités, prix d’achat et prix de vente, et génère votre comptabilité.',
-                },
-                {
-                  id: 'add_and_update_stock',
-                  title: 'Nouveaux + Mise à jour quantités',
-                  desc: 'Ajoute les nouveaux articles et met à jour les quantités de stock existantes (conserve 100 % des photos).',
-                },
-                {
-                  id: 'add_only',
-                  title: 'Nouveaux articles uniquement',
-                  desc: 'Ajoute uniquement les nouveaux articles absents de la boutique sans modifier les existants.',
-                },
-              ].map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => {
-                    setSyncMode(m.id as any);
-                    if (selectedFiles.length > 0) {
-                      runPreview(selectedFiles, {
-                        tableName: selectedTable,
-                        mode: m.id,
-                        customMapping: mapping,
-                      });
-                    }
-                  }}
-                  className={`p-4 rounded-xl border text-left transition-colors ${
-                    syncMode === m.id
-                      ? 'border-blue-700 bg-blue-50/50'
-                      : 'border-slate-200 hover:border-slate-300'
-                  }`}
-                >
-                  <p className="text-xs font-bold text-slate-900">{m.title}</p>
-                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">{m.desc}</p>
-                </button>
-              ))}
+            {/* Non-Destructive Sync Mode Cards */}
+            <div className="bg-emerald-50/60 border border-emerald-200 rounded-xl p-3.5 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-700" />
+                <p className="text-xs font-bold text-emerald-950">
+                  Mode de Mise à Jour sans Tout Régénérer (Protège vos Photos, Titres &amp; Textes modifiés)
+                </p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                {[
+                  {
+                    id: 'update_stock_and_prices',
+                    title: '1. Mise à jour Stock & Prix (Recommandé)',
+                    desc: 'Met à jour quantités, prix d’achat et prix de vente + ajoute les nouveaux articles. Conserve 100 % de vos photos, titres et descriptions.',
+                  },
+                  {
+                    id: 'add_and_update_stock',
+                    title: '2. Mise à jour Quantités seules',
+                    desc: 'Ajoute les nouveaux articles et met à jour uniquement les quantités en stock (ne touche ni aux prix ni aux photos/textes).',
+                  },
+                  {
+                    id: 'add_only',
+                    title: '3. Nouveaux articles uniquement',
+                    desc: 'Ajoute uniquement les nouveaux produits absents de la boutique sans modifier aucun produit existant.',
+                  },
+                  {
+                    id: 'full_sync',
+                    title: '4. Synchronisation complète',
+                    desc: 'Synchronise quantités, prix et textes depuis le fichier (tout en conservant vos photos existantes).',
+                  },
+                ].map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => {
+                      setSyncMode(m.id as any);
+                      if (selectedFiles.length > 0) {
+                        runPreview(selectedFiles, {
+                          tableName: selectedTable,
+                          mode: m.id,
+                          customMapping: mapping,
+                        });
+                      }
+                    }}
+                    className={`p-3.5 rounded-xl border text-left transition-colors ${
+                      syncMode === m.id
+                        ? 'border-emerald-700 bg-white ring-2 ring-emerald-600/20 shadow-sm'
+                        : 'border-slate-200 bg-white/80 hover:border-slate-300'
+                    }`}
+                  >
+                    <p className="text-xs font-bold text-slate-900">{m.title}</p>
+                    <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">{m.desc}</p>
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 flex items-center justify-between gap-3">
@@ -1615,9 +1643,26 @@ export function AdminStockImport({
               )}
             </div>
 
+            {filteredLevels.length > 0 && (
+              <div className="p-3 border-b border-slate-100 bg-slate-50/50">
+                <PaginationBar
+                  currentPage={safeLevelsPage}
+                  totalItems={filteredLevels.length}
+                  pageSize={levelsPageSize}
+                  pageSizeOptions={[5, 10, 20, 50]}
+                  onPageChange={(page) => setLevelsPage(page)}
+                  onPageSizeChange={(size) => {
+                    setLevelsPageSize(size);
+                    setLevelsPage(1);
+                  }}
+                  itemLabel="articles en stock"
+                />
+              </div>
+            )}
+
             {/* Mobile Cards for Inline Stock & Prices */}
             <div className="divide-y divide-slate-100 lg:hidden">
-              {filteredLevels.map((p) => {
+              {paginatedLevels.map((p) => {
                 const draft = getRowDraft(p);
                 const costNum = Number(draft.costPriceDzd) || 0;
                 const saleNum = Number(draft.priceDzd) || 0;
@@ -1772,7 +1817,7 @@ export function AdminStockImport({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredLevels.map((p) => {
+                  {paginatedLevels.map((p) => {
                     const draft = getRowDraft(p);
                     const costNum = Number(draft.costPriceDzd) || 0;
                     const saleNum = Number(draft.priceDzd) || 0;
@@ -1917,6 +1962,23 @@ export function AdminStockImport({
                 </tbody>
               </table>
             </div>
+
+            {filteredLevels.length > 0 && (
+              <div className="p-3 border-t border-slate-100 bg-slate-50/50">
+                <PaginationBar
+                  currentPage={safeLevelsPage}
+                  totalItems={filteredLevels.length}
+                  pageSize={levelsPageSize}
+                  pageSizeOptions={[5, 10, 20, 50]}
+                  onPageChange={(page) => setLevelsPage(page)}
+                  onPageSizeChange={(size) => {
+                    setLevelsPageSize(size);
+                    setLevelsPage(1);
+                  }}
+                  itemLabel="articles en stock"
+                />
+              </div>
+            )}
           </div>
 
           {/* Recent Stock Movements Audit Trail */}

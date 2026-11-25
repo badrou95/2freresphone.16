@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Lock, MapPin, MessageCircle } from 'lucide-react';
+import { Lock, MapPin, MessageCircle, Smartphone, X } from 'lucide-react';
 import { AuthProvider } from './context/AuthContext';
 import { CartProvider, useCart } from './context/CartContext';
 import { apiFetch } from './lib/api';
+import { initStoreAdPixels, trackAdPixelEvent } from './lib/pixels';
 import { StoreBootstrap, StoreProduct, StoreSettings } from './types';
 import { BrandLogo } from './components/BrandLogo';
 import { StoreHeader, StoreRoute } from './components/store/StoreHeader';
@@ -71,6 +72,14 @@ function StorefrontApp() {
   const [products, setProducts] = useState<StoreProduct[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [pwaDismissed, setPwaDismissed] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem('2fp_pwa_dismissed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [pwaModalOpen, setPwaModalOpen] = useState(false);
 
   const navigate = useCallback((to: string) => {
     if (window.location.pathname + window.location.search !== to) {
@@ -88,7 +97,11 @@ function StorefrontApp() {
 
   const [, setUiTick] = useState(0);
   useEffect(() => {
-    const bump = () => setUiTick((t) => t + 1);
+    initStoreAdPixels(getSaasConfig());
+    const bump = () => {
+      initStoreAdPixels(getSaasConfig());
+      setUiTick((t) => t + 1);
+    };
     window.addEventListener('2fp-currency-change', bump);
     window.addEventListener('2fp-lang-change', bump);
     window.addEventListener('2fp-saas-config-change', bump);
@@ -138,9 +151,57 @@ function StorefrontApp() {
   const whatsappDigits = settings.whatsappPhone.replace(/\D/g, '');
   const activeSocials = (bootstrap?.socialLinks || []).filter((s) => s.isActive);
 
+  const handleAddToCartWithPixel = (p: StoreProduct, qty = 1, color?: string) => {
+    addItem(p, qty, color);
+    trackAdPixelEvent(
+      'AddToCart',
+      {
+        content_ids: [String(p.id)],
+        content_name: p.name,
+        value: p.priceDzd * qty,
+        currency: 'DZD',
+        num_items: qty,
+      },
+      getSaasConfig(),
+    );
+  };
+
+  const handleHeaderSearchChange = useCallback((nextQuery: string) => {
+    const params = new URLSearchParams(window.location.search);
+    const currentGroup = params.get('group') || undefined;
+    const currentCategory = params.get('category') || undefined;
+
+    const nextParams = new URLSearchParams();
+    if (currentGroup) nextParams.set('group', currentGroup);
+    if (currentCategory) nextParams.set('category', currentCategory);
+    if (nextQuery.trim()) nextParams.set('q', nextQuery);
+
+    const qs = nextParams.toString();
+    const targetUrl = qs ? `/catalogue?${qs}` : '/catalogue';
+
+    if (window.location.pathname === '/catalogue') {
+      window.history.replaceState({}, '', targetUrl);
+    } else {
+      window.history.pushState({}, '', targetUrl);
+    }
+
+    setRoute({
+      page: 'catalog',
+      group: currentGroup,
+      category: currentCategory,
+      query: nextQuery || undefined,
+    });
+  }, []);
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
-      <StoreHeader settings={settings} route={route} navigate={navigate} />
+      <StoreHeader
+        settings={settings}
+        route={route}
+        navigate={navigate}
+        searchQuery={route.page === 'catalog' ? route.query || '' : ''}
+        onSearchChange={handleHeaderSearchChange}
+      />
 
       <main className="flex-1">
         {loading && !bootstrap ? (
@@ -170,21 +231,21 @@ function StorefrontApp() {
                 products={products}
                 loading={loading}
                 navigate={navigate}
-                onAddToCart={(p) => addItem(p, 1)}
+                onAddToCart={(p) => handleAddToCartWithPixel(p, 1)}
               />
             )}
 
             {route.page === 'catalog' && (
               <CatalogView
-                key={`${route.group || ''}-${route.category || ''}-${route.query || ''}`}
                 products={products}
                 categories={bootstrap.categories}
                 loading={loading}
                 initialGroup={route.group || ''}
                 initialCategory={route.category || ''}
                 initialQuery={route.query || ''}
+                onQueryChange={handleHeaderSearchChange}
                 onSelectProduct={(slug) => navigate(`/produit/${encodeURIComponent(slug)}`)}
-                onAddToCart={(p) => addItem(p, 1)}
+                onAddToCart={(p) => handleAddToCartWithPixel(p, 1)}
               />
             )}
 
@@ -196,7 +257,7 @@ function StorefrontApp() {
                 allProducts={products}
                 onSelectProduct={(nextSlug) => navigate(`/produit/${encodeURIComponent(nextSlug)}`)}
                 onBack={() => navigate('/catalogue')}
-                onAddToCart={(p, qty, color) => addItem(p, qty, color)}
+                onAddToCart={(p, qty, color) => handleAddToCartWithPixel(p, qty, color)}
                 onGoCheckout={() => navigate('/commande')}
                 onTrackOrder={(ref) => navigate(`/suivi?ref=${encodeURIComponent(ref)}`)}
               />
@@ -319,17 +380,111 @@ function StorefrontApp() {
             <span>
               © {new Date().getFullYear()} {settings.storeName} — Paiement à la livraison (DZD) · 58 Wilayas
             </span>
-            <button
-              type="button"
-              onClick={() => navigate('/admin')}
-              className="inline-flex items-center gap-1.5 text-slate-500 hover:text-slate-300 transition-colors"
-            >
-              <Lock className="w-3 h-3" />
-              <span>Administration</span>
-            </button>
+            <div className="flex items-center gap-4">
+              {getSaasConfig().pwaInstallBannerEnabled && (
+                <button
+                  type="button"
+                  onClick={() => setPwaModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 text-slate-400 hover:text-white transition-colors"
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>Installer l’application mobile</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => navigate('/admin')}
+                className="inline-flex items-center gap-1.5 text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                <Lock className="w-3 h-3" />
+                <span>Administration</span>
+              </button>
+            </div>
           </div>
         </div>
       </footer>
+
+      {getSaasConfig().pwaInstallBannerEnabled && !pwaDismissed && route.page === 'home' && (
+        <div className="fixed bottom-4 left-4 z-30 max-w-xs bg-slate-900 text-white border border-slate-700 rounded-2xl p-3.5 shadow-xl flex items-start gap-3">
+          <div className="w-9 h-9 rounded-xl bg-blue-600/20 text-blue-400 flex items-center justify-center shrink-0">
+            <Smartphone className="w-5 h-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-bold">Application {settings.storeName}</p>
+            <p className="text-[11px] text-slate-300 mt-0.5">
+              Ajoutez la boutique et le tableau de bord sur votre écran d’accueil mobile.
+            </p>
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => setPwaModalOpen(true)}
+                className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold"
+              >
+                Installer
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPwaDismissed(true);
+                  try {
+                    sessionStorage.setItem('2fp_pwa_dismissed', '1');
+                  } catch {
+                    // ignore
+                  }
+                }}
+                className="text-[11px] text-slate-400 hover:text-white"
+              >
+                Plus tard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pwaModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 border border-slate-200 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Smartphone className="w-5 h-5 text-blue-700" />
+                <h3 className="font-display font-bold text-base text-slate-900">
+                  Installer {settings.storeName} sur votre téléphone
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPwaModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="space-y-2.5 text-xs text-slate-600">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <p className="font-bold text-slate-900">Sur Android (Chrome)</p>
+                <p className="mt-0.5">
+                  Appuyez sur le menu <strong>⋮</strong> en haut à droite puis sélectionnez{' '}
+                  <strong>« Installer l’application »</strong> ou <strong>« Ajouter à l’écran d’accueil »</strong>.
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <p className="font-bold text-slate-900">Sur iPhone / iPad (Safari)</p>
+                <p className="mt-0.5">
+                  Appuyez sur le bouton <strong>Partager</strong> en bas de l’écran puis choisissez{' '}
+                  <strong>« Sur l’écran d’accueil »</strong>.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPwaModalOpen(false)}
+              className="w-full py-2.5 rounded-xl bg-slate-900 text-white text-xs font-bold"
+            >
+              Compris
+            </button>
+          </div>
+        </div>
+      )}
 
       {getSaasConfig().whatsappFloatingButtonEnabled && route.page !== 'product' && (
         <a

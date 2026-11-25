@@ -21,6 +21,7 @@ import { printProductThermalLabels } from '../../lib/printer';
 import { CATEGORY_GROUPS, formatDzd } from '../../shared/domain';
 import { StoreSettings } from '../../types';
 import { ImageZoomLightbox } from '../ImageZoomLightbox';
+import { PaginationBar } from '../PaginationBar';
 import { ProductImage } from '../ProductImage';
 import { MdfIdfBinaryDecoderModule } from './MdfIdfBinaryDecoderModule';
 import { OkwinImageStudio, ProductColorsEditor } from './OkwinImageStudio';
@@ -140,6 +141,10 @@ export function AdminProducts({
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
+  // Pagination state (default 10 products per page, options 5, 10, 20, 50)
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(10);
+
   const missingPhotoCount = products.filter((p) => !p.hasPhotos).length;
 
   const filteredProducts = useMemo(() => {
@@ -155,6 +160,14 @@ export function AdminProducts({
       return true;
     });
   }, [products, search, onlyMissingPhotos, typeFilter, categoryFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+
+  const paginatedProducts = useMemo(() => {
+    const startIndex = (safeCurrentPage - 1) * pageSize;
+    return filteredProducts.slice(startIndex, startIndex + pageSize);
+  }, [filteredProducts, safeCurrentPage, pageSize]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const visibleIds = useMemo(() => filteredProducts.map((p) => p.id as number), [filteredProducts]);
@@ -858,6 +871,21 @@ export function AdminProducts({
             </div>
           )}
 
+          {filteredProducts.length > 0 && (
+            <PaginationBar
+              currentPage={safeCurrentPage}
+              totalItems={filteredProducts.length}
+              pageSize={pageSize}
+              pageSizeOptions={[5, 10, 20, 50]}
+              onPageChange={(page) => setCurrentPage(page)}
+              onPageSizeChange={(size) => {
+                setPageSize(size);
+                setCurrentPage(1);
+              }}
+              itemLabel="produits"
+            />
+          )}
+
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-left">
@@ -884,7 +912,7 @@ export function AdminProducts({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredProducts.map((p) => {
+                  {paginatedProducts.map((p) => {
                     const isSelected = selectedSet.has(p.id);
                     return (
                     <tr key={p.id} className={isSelected ? 'bg-blue-50/50' : 'hover:bg-slate-50'}>
@@ -1042,6 +1070,21 @@ export function AdminProducts({
               </table>
             </div>
           </div>
+
+          {filteredProducts.length > 0 && (
+            <PaginationBar
+              currentPage={safeCurrentPage}
+              totalItems={filteredProducts.length}
+              pageSize={pageSize}
+              pageSizeOptions={[5, 10, 20, 50]}
+              onPageChange={(page) => setCurrentPage(page)}
+              onPageSizeChange={(size) => {
+                setPageSize(size);
+                setCurrentPage(1);
+              }}
+              itemLabel="produits"
+            />
+          )}
         </>
       ) : (
         /* Categories Manager */
@@ -1636,7 +1679,7 @@ export function AdminProducts({
                 availableImages={Array.isArray(formState.imageUrls) ? formState.imageUrls : []}
               />
 
-              {/* Product Photos + Okwin AI Studio (Background Changer & Multi-Image Prompt Generator) */}
+              {/* Product Photos + 2FP Lumina Studio IA (Background Changer & Multi-Image Prompt Generator) */}
               <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
@@ -1667,7 +1710,7 @@ export function AdminProducts({
                     >
                       <Sparkles className="w-3.5 h-3.5" />
                       <span>
-                        {showModalOkwin ? 'Masquer Okwin AI' : 'Okwin AI · Modifier l’arrière-plan'}
+                        {showModalOkwin ? 'Masquer Lumina Studio 2FP' : '2FP Lumina IA · Modifier l’arrière-plan'}
                       </span>
                     </button>
                   </div>
@@ -1929,11 +1972,11 @@ export function AdminProducts({
                           setSelectedOkwinSourceUrl(img.url);
                           setShowPhotoModalOkwin(true);
                         }}
-                        title="Modifier l’arrière-plan avec Okwin AI"
+                        title="Modifier l’arrière-plan avec 2FP Lumina Studio IA"
                         className="text-indigo-600 hover:text-indigo-800 text-[11px] font-bold inline-flex items-center gap-0.5"
                       >
                         <Sparkles className="w-3 h-3" />
-                        <span>Okwin</span>
+                        <span>Lumina 2FP</span>
                       </button>
                       <button
                         type="button"
@@ -1949,7 +1992,7 @@ export function AdminProducts({
                 ))}
               </div>
 
-              {/* Okwin AI Studio inside Photo Manager Modal */}
+              {/* 2FP Lumina Studio IA inside Photo Manager Modal */}
               <div className="pt-2 border-t border-slate-100">
                 <button
                   type="button"
@@ -1964,8 +2007,8 @@ export function AdminProducts({
                   <Sparkles className="w-4 h-4" />
                   <span>
                     {showPhotoModalOkwin
-                      ? 'Masquer Okwin AI Photo Studio'
-                      : 'Okwin AI · Modifier l’arrière-plan & Générer d’autres images via Prompts'}
+                      ? 'Masquer 2FP Lumina Studio IA'
+                      : '2FP Lumina Studio IA · Modifier l’arrière-plan & Générer d’autres images via Prompts'}
                   </span>
                 </button>
 

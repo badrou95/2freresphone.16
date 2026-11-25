@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   BarChart3,
+  Bell,
+  BellOff,
   Boxes,
   Database,
   Globe,
@@ -26,6 +28,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { adminFetch } from '../../lib/api';
+import { ADMIN_TEAM_ROLES, getSaasConfig, saveSaasConfig } from '../../shared/domain';
 import { StoreSettings } from '../../types';
 import { BrandLogo } from '../BrandLogo';
 import { AdminOverview } from './AdminOverview';
@@ -49,6 +52,30 @@ import { AdminPrinter } from './AdminPrinter';
 import { AdminPagePilot } from './AdminPagePilot';
 import { MdfIdfBinaryDecoderModule } from './MdfIdfBinaryDecoderModule';
 import { AdminSaasEcosystemHub } from './AdminSaasEcosystemHub';
+
+function playNewOrderChime() {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const now = ctx.currentTime;
+    const notes = [587.33, 880]; // D5 -> A5 chime
+    notes.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + i * 0.14);
+      gain.gain.setValueAtTime(0.15, now + i * 0.14);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.14 + 0.25);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + i * 0.14);
+      osc.stop(now + i * 0.14 + 0.26);
+    });
+  } catch {
+    // ignore audio block
+  }
+}
 
 interface AdminShellProps {
   publicSettings: StoreSettings;
@@ -92,6 +119,10 @@ export function AdminShell({
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showGlobalMdfModal, setShowGlobalMdfModal] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(
+    () => getSaasConfig().adminOrderSoundEnabled !== false,
+  );
+  const prevOrdersCountRef = useRef<number | null>(null);
 
   // Contextual sub-navigation flags
   const [productsOnlyMissingPhotos, setProductsOnlyMissingPhotos] = useState(false);
@@ -169,8 +200,18 @@ export function AdminShell({
         adminFetch<any>('/api/admin/settings'),
       ]);
 
+      const fetchedOrders = ordersRes.orders || [];
+      if (
+        prevOrdersCountRef.current !== null &&
+        fetchedOrders.length > prevOrdersCountRef.current &&
+        getSaasConfig().adminOrderSoundEnabled !== false
+      ) {
+        playNewOrderChime();
+      }
+      prevOrdersCountRef.current = fetchedOrders.length;
+
       setDashboard(dashRes);
-      setOrders(ordersRes.orders || []);
+      setOrders(fetchedOrders);
       setSales(salesRes.sales || []);
       setProducts(prodsRes.products || []);
       setGlobalThreshold(prodsRes.globalLowStockThreshold ?? 10);
@@ -326,7 +367,11 @@ export function AdminShell({
   const effectiveLogo = settingsData?.settings?.logoUrl ?? publicSettings.logoUrl;
   const effectiveStoreName = settingsData?.settings?.storeName ?? publicSettings.storeName;
 
-  const navGroups: {
+  const adminRole = admin.role || 'super_admin';
+  const roleLabel =
+    ADMIN_TEAM_ROLES.find((r) => r.value === adminRole)?.label || 'Super Admin (Gérant)';
+
+  const allNavGroups: {
     title: string;
     items: { id: AdminTab; label: string; icon: React.ComponentType<{ className?: string }>; badge?: number | string }[];
   }[] = [
@@ -336,9 +381,9 @@ export function AdminShell({
         { id: 'overview', label: 'Vue générale', icon: LayoutDashboard },
         {
           id: 'saas_hub',
-          label: 'Hub SaaS DZ & Intl',
+          label: 'Suite 2FP Pro & Livraison',
           icon: Rocket,
-          badge: 'NOUVEAU',
+          badge: '2FP PRO',
         },
         { id: 'orders', label: 'Commandes', icon: ShoppingCart, badge: dashboard?.kpis?.newOrders || undefined },
         { id: 'sales', label: 'Ventes & Compta', icon: BarChart3 },
@@ -373,7 +418,7 @@ export function AdminShell({
       items: [
         {
           id: 'pagepilot',
-          label: 'PagePilot IA (Landing Pages)',
+          label: '2FP VitrinePro IA (Landing Pages)',
           icon: Sparkles,
           badge: landingPages.length || undefined,
         },
@@ -398,6 +443,23 @@ export function AdminShell({
       ],
     },
   ];
+
+  // Role-based permissions filtering (2FP TeamGuard)
+  const allowedTabsForRole: AdminTab[] | null =
+    adminRole === 'confirmateur'
+      ? ['orders', 'customers', 'reviews', 'returns']
+      : adminRole === 'preparateur'
+      ? ['orders', 'carriers', 'printer', 'returns', 'stock']
+      : null;
+
+  const navGroups = allowedTabsForRole
+    ? allNavGroups
+        .map((g) => ({
+          ...g,
+          items: g.items.filter((it) => allowedTabsForRole.includes(it.id)),
+        }))
+        .filter((g) => g.items.length > 0)
+    : allNavGroups;
 
   const activeLabel =
     navGroups.flatMap((g) => g.items).find((i) => i.id === activeTab)?.label || 'Administration';
@@ -464,7 +526,12 @@ export function AdminShell({
 
       <div className="p-4 border-t border-slate-800 space-y-2">
         <div className="px-2">
-          <p className="text-xs font-semibold text-white truncate">{admin.fullName}</p>
+          <div className="flex items-center justify-between gap-1">
+            <p className="text-xs font-semibold text-white truncate">{admin.fullName}</p>
+            <span className="px-1.5 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800 text-[9px] font-bold">
+              {roleLabel.split(' ')[0]}
+            </span>
+          </div>
           <p className="text-[11px] text-slate-400 truncate font-mono">{admin.email}</p>
         </div>
         <div className="flex items-center gap-2 pt-1">
@@ -521,20 +588,46 @@ export function AdminShell({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => handleNavigateTab('saas_hub')}
-              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-sm"
+              onClick={() => {
+                const next = !soundEnabled;
+                setSoundEnabled(next);
+                saveSaasConfig({ adminOrderSoundEnabled: next });
+                if (next) playNewOrderChime();
+              }}
+              title={
+                soundEnabled
+                  ? 'Notifications sonores de nouvelle commande activées (cliquer pour couper)'
+                  : 'Notifications sonores désactivées (cliquer pour activer)'
+              }
+              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-semibold ${
+                soundEnabled
+                  ? 'border-blue-200 bg-blue-50 text-blue-700'
+                  : 'border-slate-200 bg-white text-slate-500'
+              }`}
             >
-              <Rocket className="w-3.5 h-3.5" />
-              <span>Hub SaaS DZ &amp; Intl</span>
+              {soundEnabled ? <Bell className="w-3.5 h-3.5" /> : <BellOff className="w-3.5 h-3.5" />}
+              <span className="hidden md:inline">{soundEnabled ? 'Son ON' : 'Son OFF'}</span>
             </button>
-            <button
-              type="button"
-              onClick={() => setShowGlobalMdfModal(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-sm"
-            >
-              <Database className="w-3.5 h-3.5" />
-              <span>+ Ajouter le Stock (.MDF + .IDF / Compta)</span>
-            </button>
+            {!allowedTabsForRole && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleNavigateTab('saas_hub')}
+                  className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-sm"
+                >
+                  <Rocket className="w-3.5 h-3.5" />
+                  <span>Suite 2FP Pro &amp; Livraison</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowGlobalMdfModal(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-sm"
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  <span>+ Ajouter le Stock (.MDF + .IDF / Compta)</span>
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={handleRefresh}

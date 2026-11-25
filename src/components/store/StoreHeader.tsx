@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Globe, Menu, ShoppingBag, Truck, X } from 'lucide-react';
+import { Globe, Menu, Search, ShoppingBag, Truck, X } from 'lucide-react';
 import { BrandLogo } from '../BrandLogo';
 import { useCart } from '../../context/CartContext';
 import {
@@ -25,14 +25,33 @@ interface StoreHeaderProps {
   settings: StoreSettings;
   route: StoreRoute;
   navigate: (to: string) => void;
+  searchQuery?: string;
+  onSearchChange?: (query: string) => void;
 }
 
-export function StoreHeader({ settings, route, navigate }: StoreHeaderProps) {
+export function StoreHeader({
+  settings,
+  route,
+  navigate,
+  searchQuery = '',
+  onSearchChange,
+}: StoreHeaderProps) {
   const { totalItems, setIsOpen } = useCart();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [currency, setCurrency] = useState<StoreCurrency>(() => getActiveStoreCurrency());
   const [lang, setLang] = useState<StoreLang>(() => getActiveStoreLang());
   const [saasConfig, setSaasConfig] = useState(() => getSaasConfig());
+  const [localQuery, setLocalQuery] = useState<string>(
+    searchQuery || (route.page === 'catalog' && route.query ? route.query : ''),
+  );
+
+  useEffect(() => {
+    if (route.page === 'catalog') {
+      setLocalQuery(route.query ?? searchQuery ?? '');
+    } else if (!searchQuery) {
+      setLocalQuery('');
+    }
+  }, [route, searchQuery]);
 
   useEffect(() => {
     const onCur = () => setCurrency(getActiveStoreCurrency());
@@ -49,6 +68,16 @@ export function StoreHeader({ settings, route, navigate }: StoreHeaderProps) {
   }, []);
 
   const isAr = lang === 'ar';
+
+  const handleQuickSearchInput = (val: string) => {
+    setLocalQuery(val);
+    if (onSearchChange) {
+      onSearchChange(val);
+    } else {
+      const trimmed = val.trim();
+      navigate(trimmed ? `/catalogue?q=${encodeURIComponent(trimmed)}` : '/catalogue');
+    }
+  };
 
   const navItems = [
     { label: isAr ? 'الرئيسية' : 'Accueil', path: '/', active: route.page === 'home' },
@@ -79,11 +108,6 @@ export function StoreHeader({ settings, route, navigate }: StoreHeaderProps) {
     navigate(path);
   };
 
-  const handleSwitchCurrency = (next: StoreCurrency) => {
-    setCurrency(next);
-    setActiveStoreCurrency(next);
-  };
-
   const handleSwitchLang = (next: StoreLang) => {
     setLang(next);
     setActiveStoreLang(next);
@@ -91,10 +115,8 @@ export function StoreHeader({ settings, route, navigate }: StoreHeaderProps) {
 
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur border-b border-slate-200">
-      {/* Top SaaS Announcement Bar (DZBuild / Colisify / YouCan / Shopify style) */}
-      {(saasConfig.announcementBarEnabled ||
-        saasConfig.multiCurrencyEnabled ||
-        saasConfig.bilingualArFrEnabled) && (
+      {/* Top 2FP DzCore Announcement Bar */}
+      {(saasConfig.announcementBarEnabled || saasConfig.bilingualArFrEnabled) && (
         <div className="bg-slate-900 text-slate-200 text-[11px] sm:text-xs border-b border-slate-800">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-1.5 flex flex-wrap items-center justify-between gap-2">
             {saasConfig.announcementBarEnabled ? (
@@ -109,27 +131,7 @@ export function StoreHeader({ settings, route, navigate }: StoreHeaderProps) {
             )}
 
             <div className="flex items-center gap-3 shrink-0 ml-auto">
-              {/* Multi-Currency Selector (DZD default + EUR / USD for international & diaspora) */}
-              {saasConfig.multiCurrencyEnabled && (
-                <div className="inline-flex items-center gap-1 bg-slate-800 rounded-md px-1.5 py-0.5 border border-slate-700">
-                  {(['DZD', 'EUR', 'USD'] as StoreCurrency[]).map((cur) => (
-                    <button
-                      key={cur}
-                      type="button"
-                      onClick={() => handleSwitchCurrency(cur)}
-                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors ${
-                        currency === cur
-                          ? 'bg-blue-600 text-white'
-                          : 'text-slate-300 hover:text-white'
-                      }`}
-                    >
-                      {cur === 'DZD' ? 'DZD (DA)' : cur === 'EUR' ? 'EUR (€)' : 'USD ($)'}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Bilingual FR / AR Selector (DZBuild / Arkan / YouCan style) */}
+              {/* Bilingual FR / AR Selector (2FP DzCore) */}
               {saasConfig.bilingualArFrEnabled && (
                 <div className="inline-flex items-center gap-1 bg-slate-800 rounded-md px-1.5 py-0.5 border border-slate-700">
                   <Globe className="w-3 h-3 text-blue-400" />
@@ -158,7 +160,7 @@ export function StoreHeader({ settings, route, navigate }: StoreHeaderProps) {
         </div>
       )}
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4 lg:gap-6">
         {/* Zone 1: Brand mark (single-line) */}
         <a
           href="/"
@@ -172,7 +174,7 @@ export function StoreHeader({ settings, route, navigate }: StoreHeaderProps) {
         </a>
 
         {/* Zone 2: Clean single-line nav links */}
-        <nav aria-label="Navigation principale" className="hidden md:flex items-center gap-7">
+        <nav aria-label="Navigation principale" className="hidden lg:flex items-center gap-6">
           {navItems.map((item) => (
             <a
               key={item.path}
@@ -192,6 +194,35 @@ export function StoreHeader({ settings, route, navigate }: StoreHeaderProps) {
           ))}
         </nav>
 
+        {/* Zone 2.5: Quick real-time catalog search bar */}
+        <div className="hidden sm:flex items-center flex-1 max-w-xs lg:max-w-sm">
+          <div className="relative w-full">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="search"
+              value={localQuery}
+              onChange={(e) => handleQuickSearchInput(e.target.value)}
+              aria-label={isAr ? 'بحث سريع في الكتالوج' : 'Recherche rapide dans le catalogue'}
+              placeholder={
+                isAr
+                  ? 'ابحث عن منتج، علامة، مرجع...'
+                  : 'Recherche rapide (produit, marque, réf...)'
+              }
+              className="w-full pl-9 pr-8 py-1.5 text-sm rounded-lg border border-slate-200 bg-slate-50/90 text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition-all"
+            />
+            {localQuery && (
+              <button
+                type="button"
+                onClick={() => handleQuickSearchInput('')}
+                aria-label={isAr ? 'مسح البحث' : 'Effacer la recherche'}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-200/70 transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Zone 3: Single primary action (Cart) + Mobile menu toggle */}
         <div className="flex items-center gap-2 shrink-0">
           <button
@@ -210,17 +241,46 @@ export function StoreHeader({ settings, route, navigate }: StoreHeaderProps) {
             onClick={() => setMobileMenuOpen((v) => !v)}
             aria-label={mobileMenuOpen ? 'Fermer le menu' : 'Ouvrir le menu'}
             aria-expanded={mobileMenuOpen}
-            className="md:hidden p-2 rounded-lg text-slate-700 hover:bg-slate-100"
+            className="lg:hidden p-2 rounded-lg text-slate-700 hover:bg-slate-100"
           >
             {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
         </div>
       </div>
 
+      {/* Mobile quick search bar */}
+      <div className="sm:hidden px-4 pb-2.5">
+        <div className="relative w-full">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <input
+            type="search"
+            value={localQuery}
+            onChange={(e) => handleQuickSearchInput(e.target.value)}
+            aria-label={isAr ? 'بحث سريع في الكتالوج' : 'Recherche rapide dans le catalogue'}
+            placeholder={
+              isAr
+                ? 'ابحث عن منتج، علامة، مرجع...'
+                : 'Recherche rapide (produit, marque, réf...)'
+            }
+            className="w-full pl-9 pr-8 py-1.5 text-sm rounded-lg border border-slate-200 bg-slate-50 text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+          />
+          {localQuery && (
+            <button
+              type="button"
+              onClick={() => handleQuickSearchInput('')}
+              aria-label={isAr ? 'مسح البحث' : 'Effacer la recherche'}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded-full text-slate-400 hover:text-slate-700"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+
       {mobileMenuOpen && (
         <nav
           aria-label="Navigation mobile"
-          className="md:hidden border-t border-slate-200 bg-white px-4 py-3 flex flex-col gap-1"
+          className="lg:hidden border-t border-slate-200 bg-white px-4 py-3 flex flex-col gap-1"
         >
           {navItems.map((item) => (
             <a

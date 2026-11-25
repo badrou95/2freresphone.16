@@ -10,9 +10,19 @@ interface ProductCardProps {
   product: StoreProduct;
   onSelect: (slug: string) => void;
   onAddToCart: (product: StoreProduct) => void;
+  isCompared?: boolean;
+  compareDisabled?: boolean;
+  onToggleCompare?: (product: StoreProduct) => void;
 }
 
-export function ProductCard({ product, onSelect, onAddToCart }: ProductCardProps) {
+export function ProductCard({
+  product,
+  onSelect,
+  onAddToCart,
+  isCompared = false,
+  compareDisabled = false,
+  onToggleCompare,
+}: ProductCardProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const outOfStock =
     (product.productType === 'physical' && product.stockQuantity <= 0) ||
@@ -27,7 +37,13 @@ export function ProductCard({ product, onSelect, onAddToCart }: ProductCardProps
 
   return (
     <>
-      <article className="group bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col transition-transform duration-200 hover:-translate-y-0.5 hover:border-slate-300">
+      <article
+        className={`group bg-white border rounded-xl overflow-hidden flex flex-col transition-all duration-200 hover:-translate-y-0.5 ${
+          isCompared
+            ? 'border-blue-600 ring-2 ring-blue-600/20 shadow-sm'
+            : 'border-slate-200 hover:border-slate-300'
+        }`}
+      >
         <div className="aspect-[4/3] bg-white overflow-hidden relative border-b border-slate-100">
           <a
             href={`/produit/${product.slug}`}
@@ -43,6 +59,35 @@ export function ProductCard({ product, onSelect, onAddToCart }: ProductCardProps
               className="w-full h-full object-contain bg-white transition-transform duration-300 group-hover:scale-[1.02]"
             />
           </a>
+
+          {onToggleCompare && (
+            <label
+              onClick={(e) => e.stopPropagation()}
+              title={
+                compareDisabled && !isCompared
+                  ? 'Maximum 3 produits sélectionnés pour la comparaison'
+                  : 'Sélectionner pour comparer (2 à 3 produits)'
+              }
+              className={`absolute top-2.5 left-2.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold shadow-sm backdrop-blur-xs transition-colors select-none ${
+                isCompared
+                  ? 'bg-blue-700 text-white cursor-pointer'
+                  : compareDisabled
+                  ? 'bg-white/80 text-slate-400 border border-slate-200 cursor-not-allowed'
+                  : 'bg-white/95 hover:bg-blue-50 text-slate-800 border border-slate-200/90 cursor-pointer'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={isCompared}
+                disabled={compareDisabled && !isCompared}
+                onChange={() => onToggleCompare(product)}
+                aria-label={`Comparer ${product.name}`}
+                className="w-3.5 h-3.5 rounded border-slate-300 text-blue-700 focus:ring-blue-600 accent-blue-700 cursor-pointer disabled:cursor-not-allowed"
+              />
+              <span>{isCompared ? 'Sélectionné' : 'Comparer'}</span>
+            </label>
+          )}
+
           {product.primaryImage && (
             <button
               type="button"
